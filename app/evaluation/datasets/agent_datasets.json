@@ -1,0 +1,136 @@
+{
+  "goldens": [
+    {
+      "scenario": "先查联系方式，再追问求职意向与薪资",
+      "expected_outcome": "第一轮返回电话/微信/邮箱；第二轮返回大模型算法、20-30K、成都。",
+      "turns": [
+        {
+          "role": "user",
+          "content": "唐凯的联系方式是什么？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯的电话是19180958657，微信号也是19180958657，邮箱792213481@qq.com。",
+          "retrieval_context": []
+        },
+        {
+          "role": "user",
+          "content": "他的求职意向和期望薪资呢？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯的求职意向是大模型算法，期望薪资20-30K，期望城市成都。",
+          "retrieval_context": []
+        }
+      ],
+      "context": ["唐凯个人简历"],
+      "additional_metadata": {
+        "expected_tools": [
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"},
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"}
+        ]
+      }
+    },
+    {
+      "scenario": "先问大模型能力，再追问具体项目细节",
+      "expected_outcome": "第一轮列出Transformer/RAG/Agent/微调等技术；第二轮详述企业级Agent+RAG项目。",
+      "turns": [
+        {
+          "role": "user",
+          "content": "唐凯在大语言模型方面有哪些技术能力？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯精通Transformer框架，Prompt工程、RAG增强检索、Agent开发框架；拥有SFT监督微调、LoRA微调、RLHF对齐优化的实战经验，并持有阿里云大模型ACP证书。",
+          "retrieval_context": []
+        },
+        {
+          "role": "user",
+          "content": "他在企业级Agent+RAG系统项目中具体做了哪些工作？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯独立完成了端到端开发，包括方案设计、模型选型、工具链构建（LlamaIndex/LangChain/LangGraph），使用FastAPI+SSE实现流式接口，支持多轮对话，成功应用于政企知识问答与流程自动化。",
+          "retrieval_context": []
+        }
+      ],
+      "context": ["唐凯项目经历"],
+      "additional_metadata": {
+        "expected_tools": [
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"},
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"}
+        ]
+      }
+    },
+    {
+      "scenario": "先问工作经历，再追问教育背景",
+      "expected_outcome": "第一轮列出最近工作（上海新致AI算法）等；第二轮说出大专和本科的学校与专业。",
+      "turns": [
+        {
+          "role": "user",
+          "content": "唐凯在哪些公司工作过？最近一份工作是什么？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯最近在上海新致软件股份有限公司成都分公司担任AI算法工程师（2024.04至今），此前在成都宏宇数智、京北方信息、成都百都科技等公司担任运维工程师。",
+          "retrieval_context": []
+        },
+        {
+          "role": "user",
+          "content": "他的教育背景是什么？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "唐凯拥有四川化工职业技术学院模具设计与制造大专学历，以及四川师范大学社会工作与管理本科学历，均在2011-2014年就读。",
+          "retrieval_context": []
+        }
+      ],
+      "context": ["唐凯工作经历与教育经历"],
+      "additional_metadata": {
+        "expected_tools": [
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"},
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"}
+        ]
+      }
+    },
+    {
+      "scenario": "先查知识库获取年龄，再问当前时间",
+      "expected_outcome": "第一轮返回唐凯35岁；第二轮返回准确的北京时间。",
+      "turns": [
+        {
+          "role": "user",
+          "content": "唐凯今年多大了？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "根据简历，唐凯现年35岁。",
+          "retrieval_context": []
+        },
+        {
+          "role": "user",
+          "content": "现在北京时间是几点？",
+          "retrieval_context": []
+        },
+        {
+          "role": "assistant",
+          "content": "当前北京时间：xxxx年xx月xx日 xx时xx分xx秒，星期x",
+          "retrieval_context": []
+        }
+      ],
+      "context": ["唐凯简历"],
+      "additional_metadata": {
+        "expected_tools": [
+          {"name": "async_knowledge_query_ask", "description": "知识库查询"},
+          {"name": "async_get_current_time", "description": "获取当前时间"}
+        ]
+      }
+    }
+  ]
+}

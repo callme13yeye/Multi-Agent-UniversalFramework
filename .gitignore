@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# Environment
+key.env
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models
+models/
+
+# Claude
+.claude/sessions/
+.claude/projects/*/memory/*.md
+.claude/projects/*/538cdaaf-*.jsonl
+
+# Logs
+*.log

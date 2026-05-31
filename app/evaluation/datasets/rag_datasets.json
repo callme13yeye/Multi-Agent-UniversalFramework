@@ -1,0 +1,116 @@
+{
+  "goldens": [
+    {
+      "input": "唐凯的联系方式是什么？",
+      "expected_output": "唐凯的联系方式为：电话19180958657，微信号19180958657，邮箱792213481@qq.com。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "唐凯 电话：19180958657 微信号：19180958657 邮箱：792213481@qq.com"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯的求职意向是什么？期望薪资是多少？",
+      "expected_output": "唐凯的求职意向是大模型算法，期望薪资20-30K，期望城市为成都。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "工作时长：11年 求职意向：大模型算法 期望薪资：20-30K 期望城市：成都"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在大语言模型方面有哪些技术能力？",
+      "expected_output": "唐凯精通Transformer框架，Prompt工程、RAG增强检索、Agent开发框架，拥有SFT监督微调、Lora微调、RLHF对齐优化的实战经验。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "大语言模型技术能力：精通Transformer框架，Prompt工程、RAG增强检索、Agent开发框架。拥有SFT监督微调、Lora微调、RLHF对齐优化的实战经验。"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在计算机视觉方面熟悉哪些技术？",
+      "expected_output": "唐凯熟悉YOLO系列模型，能够进行目标检测、实例分割、目标分类的工业场景部署；擅长PaddleOCR的全栈技术，包括检测、识别、方向分类、版面分析、表格识别、关键信息抽取等。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "计算机视觉能力：熟悉YOLO系列模型，能够基于目标检测、实例分割、目标分类进行工业场景部署。擅长PaddleOCR的全栈技术，检测、识别、方向分类、版面分析、表格识别、关键信息抽取（SER+RE）等。"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在哪些公司工作过？最近一份工作是什么？",
+      "expected_output": "唐凯最近一份工作是在上海新致软件股份有限公司成都分公司担任AI算法工程师（2024年4月至今）。此前还在成都宏宇数智科技有限公司、京北方信息技术股份有限公司、成都百都科技有限公司担任过运维工程师，以及在其他公司担任过其他职位。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "上海新致软件股份有限公司成都分公司 ai算法工程师 2024.04-至今",
+        "成都宏宇数智科技有限公司 运维工程师 2022.10-2024.03",
+        "京北方信息技术股份有限公司 运维工程师 2021.06-2022.09",
+        "成都百都科技有限公司 运维工程师 2016.05-2018.03"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在教育方面的背景是什么？",
+      "expected_output": "唐凯拥有四川化工职业技术学院模具设计与制造专业的大专学历，以及四川师范大学社会工作与管理专业的本科学历，均于2011年至2014年就读。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "四川化工职业技术学院 大专 模具设计与制造 2011-2014",
+        "四川师范大学 本科 社会工作与管理 2011-2014"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在运维方面有哪些技术能力？",
+      "expected_output": "唐凯拥有五年复杂系统运维经验，熟练Linux系统、H3C网络设备管理；掌握Docker/Kubernetes集群及vSphere虚拟化平台搭建维护；擅长MySQL、Redis数据库集群部署管理及主从复制、哨兵模式等优化；熟悉Zabbix、Prometheus监控体系，以及Nginx反向代理和负载均衡。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "运维技术能力：拥有五年复杂系统运维经验，熟练linux系统、掌握主流品牌H3C网络管理设备。熟练搭建维护Docker/Kubenetes集群及虚拟化平台(Vsphere)。擅长关系型非关系型数据库Mysql，Redis，分布式集群部署管理，哨兵模式，主从复制，读写分离。部署Zabbix、Prometheus监控体系。基于Nginx实现反向代理、负载均衡及安全策略配置。"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在企业级Agent+RAG系统项目中做了哪些工作？",
+      "expected_output": "唐凯独立完成端到端的企业级Agent+RAG系统开发，涵盖方案设计、模型选型、工具链构建（LlamaIndex/LangChain/LangGraph）、异步流式接口封装（FastAPI+SSE）、实现多轮对话（checkpoint），成功用于政企场景的知识问答与流程自动化。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "企业级Agent+RAG系统：独立完成端对端的企业级Agent+RAG系统开发，涵盖方案设计、模型选型（兼顾本地化部署）、工具链构建（Llamaindex/Langchain/Langgraph）、异步流式接口封装（FastAPI+SSE）、实现多轮对话（chenkpoint）、成功用于政企场景的知识问答与流程自动化。"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    },
+    {
+      "input": "唐凯在大模型微调方面做了哪些工作？",
+      "expected_output": "唐凯基于Qwen2.5-7B模型进行了SFT的LoRA微调，引入了FlashAttention-2和DeepSpeed ZeRO-2分布式训练；随后引入RLHF对齐优化，掌握PPO算法和DPO直接偏好优化方法，能根据场景灵活选择优化方案。",
+      "context": ["唐凯个人简历"],
+      "retrieval_context": [
+        "基于Qwen2.5-7B模型进行政务对话数据的SFT LoRA微调，引入FlashAttention-2加速长序列自注意力计算，结合DeepSpeed ZeRO-2分布式训练。引入RLHF对齐优化，理解RLHF原理（PPO算法，KL离散约束），掌握更高效的DPO方法，了解KTO、GRPO等多种对齐策略。"
+      ],
+      "additional_metadata": {
+        "domain": "rag",
+        "expected_tools": ["async_knowledge_query_ask"]
+      }
+    }
+  ]
+}
