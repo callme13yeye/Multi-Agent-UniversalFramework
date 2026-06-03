@@ -1,8 +1,13 @@
 # app/async_ensure_user_skills_init.py
 from langgraph.store.base import BaseStore
-from app.skills.init_skill import DEFAULT_AGENTS_MD
 
 import logging
+
+DEFAULT_AGENTS_MD = """# 全局准则
+- 始终使用中文回复。
+- 回答应简洁、专业，如有不确定请联系管理员。
+- 遇到法律、财务等高风险问题时，必须附加免责声明。
+"""
 
 logging.basicConfig(
     level=logging.INFO,

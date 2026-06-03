@@ -26,11 +26,29 @@ SOURCES_TTL = 1800       # 30 分钟 — 检索来源引用
 PENDING_QA_TTL = 300     # 5 分钟 — 待反馈确认的 Q&A
 
 
-def register_knowledge_resource(embed_model, rerank_model, llama_chat_model, retrieval_pipeline=None):
+def _get_llm_for_retrieval():
+    """获取检索答案生成的 LLM（优先从 gateway 动态获取）。"""
+    gateway = knowledge_resources.get("gateway")
+    if gateway is not None:
+        from app.gateway.types import ModelRole
+        chain = gateway.get_model_chain(ModelRole.RETRIEVAL_LLM)
+        if chain:
+            return chain[0][1]
+    return knowledge_resources.get("llama_chat_model")
+
+
+def register_knowledge_resource(
+    embed_model, rerank_model, llama_chat_model,
+    retrieval_pipeline=None,
+    gateway=None,
+):
     knowledge_resources["embed_model"] = embed_model
     knowledge_resources["rerank_model"] = rerank_model
     knowledge_resources["llama_chat_model"] = llama_chat_model
     knowledge_resources["retrieval_pipeline"] = retrieval_pipeline
+    if gateway is not None:
+        knowledge_resources["gateway"] = gateway
+
 
 @tool
 async def async_get_current_time() -> str:
@@ -141,7 +159,8 @@ async def async_knowledge_query_ask(
         await redis_manager.delete(sources_key)
 
     # ── Step 5: 基于检索结果生成回答 ────────────────────────
-    llama_model = knowledge_resources.get("llama_chat_model")
+    # 采用健康感知的模型调用（自动降级/恢复，与 Agent 层共享健康状态）
+    llama_model = _get_llm_for_retrieval()
     if llama_model is None:
         return "语言模型未初始化"
 
@@ -168,12 +187,12 @@ async def async_knowledge_query_ask(
 
     try:
         logger.info(f"[知识库查询] 检索到 {len(nodes)} 个节点，取 top-{top_k} 生成回答……")
-        llm_response = await llama_model.acomplete(
+        prompt = (
             f"{system_prompt}\n\n"
             f"参考资料:\n{context_text}\n\n"
             f"问题: {question}\n回答:"
         )
-
+        llm_response = await llama_model.acomplete(prompt)
         full_response = llm_response.text.strip()
         if not full_response:
             logger.warning("[知识库查询] LLM 生成回答为空")

@@ -99,14 +99,10 @@ app/
 ├── milvus_manager.py        # Milvus RBAC 多租户管理
 │
 ├── pg_database.py           # 双数据库管理器 (auth_db + conversations_db)
-├── middleware/
-│   └── planning_middleware.py # CoT 规划中间件
 ├── skills/
-│   ├── skill_router.py      # 渐进式披露路由 (关键词匹配激活技能)
-│   ├── {finance,hr,engineering,business}/
-│   │   ├── SKILL.md         # 技能定义
-│   │   └── AGENT.md         # SubAgent 角色定义
-│   └── init_skill.py        # 用户技能初始化
+│   └── {finance,hr,engineering,business}/
+│       ├── SKILL.md         # 技能定义
+│       └── AGENT.md         # SubAgent 角色定义
 ├── workflow/
 │   ├── engine.py            # 工作流引擎 (create/take_action/get/list)
 │   ├── reimbursement.py     # 报销审批 LangGraph 状态机
@@ -129,14 +125,13 @@ app/
 ```
 POST /chat → SSE 流式响应
   → Agent 中间件管线:
-    SkillRouter(关键词激活技能)
-    → Skills(注入技能 system prompt)
-    → Planning(CoT 任务规划)
-    → ModelCallLimit(30次/请求)
+    SkillsMiddleware(注入技能元数据到 system prompt)
+    → ModelCallLimit(thread=100次/会话, run=15次/请求)
     → ModelFallback(DeepSeek→Qwen 降级)
     → ModelRetry(3次指数退避)
-    → ToolCallLimit(50次/请求)
+    → ToolCallLimit(全局50次, web_search单独20次)
     → ToolRetry(3次指数退避)
+  → LLM 自路由: 通过 Function Calling 自主选择工具/SubAgent
   → 工具调用 (web_search/knowledge_query/task/...)
   → Specialist SubAgent 委托 (通过 task 工具)
   → 流式输出 + SSE events + 引用溯源
@@ -171,7 +166,7 @@ POST /upload → SHA-256 哈希 → 去重检测(pg_database)
 - **双数据库读写分离**: auth_db (asyncpg) 存用户/会话/文档元数据; conversations_db (psycopg AsyncConnectionPool) 存 LangGraph checkpointer + store
 - **Milvus RBAC 多租户**: 每个注册用户自动创建独立 Milvus 用户 + 角色 + Collection，密码加密存储
 - **节点去重**: `node_id = 文件哈希_内容哈希`，Milvus 写入幂等
-- **渐进式披露**: SkillRouter 按用户 query 关键词仅激活 1-3 个相关技能，减少无关上下文占用
+- **LLM 自路由**: 参考 Claude Code / HermesAgent / OpenClaw，不设外部分类器，所有工具描述和 SubAgent 列表在 system prompt 中始终可见，LLM 通过 Function Calling 自行选择。Skills 元数据通过 SkillsMiddleware 按需加载完整内容
 - **配置方式**: 敏感配置在 `key.env`（不提交），通用配置在 `config.py`
 - **行为准则**: 见 `.claude/CLAUDE.md`（先思考再编码 / 简洁优先 / 精准修改 / 目标驱动执行）
 
@@ -180,14 +175,13 @@ POST /upload → SHA-256 哈希 → 去重检测(pg_database)
 ```bash
 # 新增 Specialist Agent
 # 1. 在 app/skills/ 下创建新目录
-# 2. 编写 SKILL.md（技能定义描述）
+# 2. 编写 SKILL.md（技能定义描述 + YAML frontmatter: name, description）
 # 3. 编写 AGENT.md（SubAgent 角色定义 + YAML frontmatter: name, description）
-# 4. 在 skill_router.py 的 SKILL_DOMAIN_KEYWORDS 中添加领域关键词
+#    AGENT.md 会被 discover_specialist_agents() 自动发现并注入 system prompt
 
 # 新增 Agent 工具
 # 1. 在 app/async_tools.py 中定义 async 函数
 # 2. 在 main.py 的 tools 列表中注册
-# 3. 如需技能专属工具，在 app/skills/tools.py 中用 @skill_tool() 注册
 
 # 新增工作流
 # 1. 在 app/workflow/ 下定义 LangGraph 状态机

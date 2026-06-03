@@ -19,15 +19,14 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
     ModelRetryMiddleware,
 )
+from app.gateway import GatewayMiddleware, ModelRole
 from deepagents.middleware import SkillsMiddleware
-from app.skill_router import SkillRouterMiddleware
-from app.planning_middleware import PlanningMiddleware
 from deepagents.backends import StateBackend, StoreBackend, CompositeBackend, FilesystemBackend
 
 
 async def async_create_agent(
         model_name: str,
-        toolrouter_model_name: str,
+        fallback_model_name: str,
         tools: list,
         system_prompt: str,
         checkpointer: Any,
@@ -36,12 +35,13 @@ async def async_create_agent(
         extra_middleware: Optional[Sequence[Any]] = None,
         extra_middleware_position: Literal["prepend", "append"] = "append",
         subagents: Optional[Sequence[SubAgent | CompiledSubAgent]] = None,
+        gateway: Any = None,
 ):
     """Create a deep agent with the full middleware pipeline.
 
     Args:
         model_name: Primary chat model name (DeepSeek).
-        toolrouter_model_name: Fallback model name (Qwen).
+        fallback_model_name: Fallback model name (Qwen).
         tools: List of tools available to the agent.
         system_prompt: System instructions for the agent.
         checkpointer: LangGraph checkpointer for state persistence.
@@ -52,9 +52,16 @@ async def async_create_agent(
         subagents: Specialist sub-agent definitions (SubAgent | CompiledSubAgent).
                   When provided, the agent becomes a Router/Supervisor that can
                   spawn domain-specific sub-agents via the ``task`` tool.
+        gateway: Optional ModelGateway for intelligent model routing.
+                 When provided, GatewayMiddleware replaces ModelFallbackMiddleware
+                 for health-aware routing with circuit breakers and hot-swap.
     """
     langchain_api_llm = await AsyncLoadModel.async_langchain_api_model(model_name)
-    fallback_model = await AsyncLoadModel.async_fallback_api_model(toolrouter_model_name)
+
+    # 仅在无 gateway 时加载 fallback 模型（gateway 自行管理 fallback 链）
+    langchain_fallback_model = None
+    if gateway is None:
+        langchain_fallback_model = await AsyncLoadModel.async_langchain_fallback_api_model(fallback_model_name)
 
     # ── CompositeBackend：统一文件/技能/记忆的后端路由 ──────────
     backend = CompositeBackend(
@@ -83,40 +90,44 @@ async def async_create_agent(
     # 我们在之后注入以下定制中间件，然后 create_deep_agent 再追加
     # Memory/HumanInTheLoop 等尾部中间件。
     #
-    # 注意: SkillRouter 要在 Skills 之前执行。
-    # 我们不传 skills 参数给 create_deep_agent(避免它在基础栈中
-    # 创建)，而是手动放入 user_middleware 以保持 SkillRouter 在前的顺序。
+    # 我们不传 skills 参数给 create_deep_agent（避免它在基础栈中
+    # 创建），而是手动放入 user_middleware 以保持正确顺序。
+    #
+    # 意图路由采用 LLM 自路由模式（参考 Claude Code / HermesAgent / OpenClaw）：
+    # 所有工具描述和 SubAgent 列表在 system prompt 中始终可见，
+    # LLM 通过 Function Calling 自行选择。
+
     user_middleware: list = [
-        # 渐进式披露：根据 query 关键词仅激活相关技能
-        SkillRouterMiddleware(),
         # 技能元数据注入 system prompt
         SkillsMiddleware(
             backend=backend,
             sources=["/skills/built-in/", "/skills/"],
         ),
-        # CoT 任务规划：复杂任务先规划再执行
-        PlanningMiddleware(min_query_length=15),
-        # 模型调用限制 — run_limit 对应单个请求内的模型调用次数
+        # 模型调用限制 — run_limit 对应单个请求，thread_limit 对应整个会话
         ModelCallLimitMiddleware(
-            thread_limit=10,
-            run_limit=30,
+            thread_limit=100,
+            run_limit=15,
             exit_behavior="end",
         ),
-        # 主模型不可用时自动降级到备用模型 (如 DeepSeek 不可用 → Qwen)
-        ModelFallbackMiddleware(first_model=fallback_model),
-        # 模型调用失败自动重试 (指数退避)
+        # 智能网关路由（替换原 ModelFallbackMiddleware）
+        # 当 gateway 注入时：健康感知路由 + 熔断 + 零停机热切换
+        # 当 gateway 未注入时：回退到静态降级
+        GatewayMiddleware(gateway=gateway, role=ModelRole.CHAT)
+        if gateway is not None
+        else ModelFallbackMiddleware(first_model=langchain_fallback_model),
+        # 模型调用失败快速重试（底层 HTTP 已有重试，这里只做 1 次快速兜底）
         ModelRetryMiddleware(
-            max_retries=3,
-            backoff_factor=2.0,
-            initial_delay=1.0,
+            max_retries=1,
+            backoff_factor=1.0,
+            initial_delay=0.5,
         ),
         # 全局限制工具调用
         ToolCallLimitMiddleware(thread_limit=50, run_limit=50),
-        # 对 web_search 单独限制防止过量 API 调用
+        # 对 web_search 单独限制 — 联网搜索最贵，按需收紧
         ToolCallLimitMiddleware(
             tool_name="web_search",
-            thread_limit=10,
-            run_limit=10,
+            thread_limit=20,
+            run_limit=5,
         ),
         # 工具调用失败自动重试 (指数退避)
         ToolRetryMiddleware(

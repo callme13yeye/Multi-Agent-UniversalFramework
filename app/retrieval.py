@@ -40,9 +40,19 @@ class QueryRewriter:
       - SPECIFIC（精确型）: 不扩写，原文直接检索
     """
 
-    def __init__(self, llm: Any, enabled: bool = True):
+    def __init__(self, llm: Any = None, enabled: bool = True, gateway: Any = None):
         self.llm = llm
         self.enabled = enabled
+        self.gateway = gateway
+
+    def _get_llm(self):
+        """获取当前应使用的 LLM（优先从 gateway 动态获取）。"""
+        if self.gateway is not None:
+            from app.gateway.types import ModelRole
+            chain = self.gateway.get_model_chain(ModelRole.RETRIEVAL_REWRITER)
+            if chain:
+                return chain[0][1]
+        return self.llm
 
     @observe(name="QueryRewriter.rewrite")
     async def rewrite(self, question: str) -> list[str]:
@@ -67,7 +77,7 @@ class QueryRewriter:
 <SPECIFIC 类型: 不生成变体，此行留空>"""
 
         try:
-            response = await self.llm.acomplete(prompt)
+            response = await self._get_llm().acomplete(prompt)
             lines = response.text.strip().split("\n")
 
             # 解析查询类型
@@ -125,19 +135,25 @@ class RetrievalPipeline:
         self,
         embed_model: HuggingFaceEmbedding,
         rerank_model: SentenceTransformerRerank,
-        llama_llm: Any,
+        fallback_llm: Optional[Any] = None,
         enable_rewriter: bool = True,
         enable_fusion: bool = True,
         top_k: int = 10,
         drop_ratio: float = 0.3,
         min_score: float = 0.70,
+        gateway: Any = None,
     ):
         self.embed_model = embed_model
         self.rerank_model = rerank_model
-        self.llama_llm = llama_llm
+        self.fallback_llm = fallback_llm
+        self.gateway = gateway
 
-        # 子组件
-        self.query_rewriter = QueryRewriter(llm=self.llama_llm, enabled=enable_rewriter)
+        # 子组件：查询重写用 fallback 模型（或 gateway 动态获取）
+        self.query_rewriter = QueryRewriter(
+            llm=self.fallback_llm,
+            enabled=enable_rewriter,
+            gateway=gateway,
+        )
 
         # 配置
         self.enable_fusion = enable_fusion

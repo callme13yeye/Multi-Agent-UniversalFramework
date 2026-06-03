@@ -20,9 +20,8 @@ from app.async_tools import (
     SOURCES_KEY_PREFIX,
     PENDING_QA_KEY_PREFIX,
 )
-from app.skills.tools import discover_skill_tools
 from app.retrieval import RetrievalPipeline
-from app.agent_definitions import discover_specialist_agents, build_router_system_prompt
+from app.agent_definitions import discover_specialist_agents
 from langchain.messages import AIMessageChunk
 from app.async_create_agent import async_create_agent
 from app.async_load_model import AsyncLoadModel
@@ -36,6 +35,8 @@ from app.async_ensure_user_skills_init import ensure_user_skills_init
 from app.routes.workflow_routes import create_workflow_router
 from app.workflow.engine import WorkflowEngine, register_workflow
 from app.workflow.reimbursement import build_reimbursement_graph
+from app.admin_routes import router as admin_router
+from app.gateway import ModelGateway, ModelRole, ModelSpec
 from miniopy_async import Minio
 from config import get_config
 
@@ -63,18 +64,12 @@ langchain_chat_model_name = config.get("langchain_chat_model_name")
 llama_chat_model_name = config.get("llama_chat_model_name")
 fallback_model_name = config.get("fallback_model_name")
 
-BASE_SYSTEM_PROMPT = """你是一个企业智能助手。你有一个 Router/Supervisor 架构——你可以自己回答问题，也可以将领域任务委托给 Specialist Agent。
+BASE_SYSTEM_PROMPT = """你是一个企业智能助手。你拥有 Router/Supervisor 架构——你可以自己回答问题，也可以将领域任务通过 ``task`` 工具委托给 Specialist Agent。
 
 通用规则：
-1. 当用户问题明确属于某个 Specialist Agent 的领域（财务/技术/业务/HR）时，
-   优先使用 ``task`` 工具委托给对应的 Specialist Agent 处理，而不是自己直接回答。
-2. 只有在你被 Specialist Agent 返回结果后，才根据结果决定是否需要进一步查知识库或联网搜索。
-3. 涉及生产环境变更的操作（重启、下线、修改配置），必须先向用户确认。
-4. 对于多步操作的运维任务（如查空闲 IP、排查故障、配置检查），
-   必须先查阅对应的 SKILL.md 文件，严格按工作流执行。
-5. 对于报销申请、请假等需要创建流程工单的请求，使用 create_reimbursement_ticket 工具创建工单。
-6. 通用简单问题（问时间、打招呼等）由你直接回答，无需委托。
-7. 请始终使用中文进行回答。
+1. 涉及生产环境变更的操作（重启、下线、修改配置），必须先向用户确认。
+2. 对于多步操作任务（如查空闲 IP、排查故障、配置检查），必须先查阅对应的 SKILL.md 文件，严格按工作流执行。
+3. 请始终使用中文进行回答。
 
 **知识库查询规则（重要）：**
 - 当 async_knowledge_query_ask 返回"未找到相关内容"，说明知识库没有可用的参考资料，你必须：
@@ -83,19 +78,69 @@ BASE_SYSTEM_PROMPT = """你是一个企业智能助手。你有一个 Router/Sup
   3. **严禁**在知识库无结果时使用模型自身知识编造答案——这会造成误导
 - 只有当 async_knowledge_query_ask 返回了实际内容时，才能基于其内容回答
 """
-tools = [async_get_current_time, async_web_search, async_knowledge_query_ask, async_create_reimbursement_ticket] + discover_skill_tools()
+tools = [async_get_current_time, async_web_search, async_knowledge_query_ask, async_create_reimbursement_ticket]
+
+# 工具名 → 工具对象映射，供 discover_specialist_agents 按 AGENT.md 的 allowed_tools 分组
+tools_map = {
+    "async_get_current_time": async_get_current_time,
+    "async_web_search": async_web_search,
+    "async_knowledge_query_ask": async_knowledge_query_ask,
+    "async_create_reimbursement_ticket": async_create_reimbursement_ticket,
+}
 
 async def initialize_model():
     embed_model = await AsyncLoadModel.async_local_load_embed_model(embed_model_path_dir)
     rerank_model = await AsyncLoadModel.async_local_load_rerank_model(rerank_model_path_dir)
     langchain_chat_llm = await AsyncLoadModel.async_langchain_api_model(langchain_chat_model_name)
     llama_chat_llm = await AsyncLoadModel.async_llama_index_api_model(llama_chat_model_name)
+    langchain_fallback_chat_llm = await AsyncLoadModel.async_langchain_fallback_api_model(fallback_model_name)
+    llama_fallback_chat_llm = await AsyncLoadModel.async_llama_fallback_api_model(fallback_model_name)
+
+    # ── 启动时校验主备模型联通性 ──
+    try:
+        test_resp = await langchain_chat_llm.ainvoke(
+            [{"role": "user", "content": "ping"}]
+        )
+        logger.info(f"[主模型] ✅ {langchain_chat_model_name} 联通正常")
+    except Exception as e:
+        logger.warning(f"[主模型] ❌ {langchain_chat_model_name} 不可用: {e}")
+
+    try:
+        test_resp = await langchain_fallback_chat_llm.ainvoke(
+            [{"role": "user", "content": "ping"}]
+        )
+        logger.info(f"[备用模型] ✅ {fallback_model_name} 联通正常")
+    except Exception as e:
+        logger.warning(f"[备用模型] ❌ {fallback_model_name} 不可用: {e}")
+
     return {
         "embed_model": embed_model,
         "rerank_model": rerank_model,
         "langchain_chat_llm": langchain_chat_llm,
         "llama_chat_llm": llama_chat_llm,
+        "langchain_fallback_chat_llm": langchain_fallback_chat_llm,
+        "llama_fallback_chat_llm": llama_fallback_chat_llm,
     }
+
+
+async def _load_model_for_role(name: str, provider: str, api_key_env: str, base_url_env: str, interface: str):
+    """根据 provider + interface 加载模型实例。
+
+    此函数封装了不同 provider 的加载差异，
+    使 ModelGateway 注册时不需要关心具体 API 类型。
+    """
+    if provider == "deepseek":
+        if interface == "langchain":
+            return await AsyncLoadModel.async_langchain_api_model(name)
+        else:
+            return await AsyncLoadModel.async_llama_index_api_model(name)
+    elif provider == "bailian":
+        if interface == "langchain":
+            return await AsyncLoadModel.async_langchain_fallback_api_model(name)
+        else:
+            return await AsyncLoadModel.async_llama_fallback_api_model(name)
+    else:
+        raise ValueError(f"未知 provider: {provider}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("应用启动中...")
@@ -133,29 +178,96 @@ async def lifespan(app: FastAPI):
         logger.warning(f"工作流引擎初始化失败（非致命）: {e}", exc_info=True)
 
     try:
-        app.state.knowledge_resources = await initialize_model()
-        # 初始化统一检索管道（需在 register_knowledge_resource 之前创建）
+        # ── 初始化模型智能网关 ────────────────────────────
+        model_config = config.get("models", {})
+        cb_config = config.get("circuit_breaker", {})
+        probe_config = config.get("health_probe", {})
+        fallback_chains = config.get("fallback_chains", {})
+
+        gateway = ModelGateway()
+
+        # 注册每个模型（LangChain + LlamaIndex 双接口）
+        for name, model_cfg in model_config.items():
+            provider = model_cfg["provider"]
+            api_key_env = model_cfg["api_key_env"]
+            base_url_env = model_cfg["base_url_env"]
+            is_primary = model_cfg.get("is_primary", False)
+
+            for role_name in model_cfg["roles"]:
+                role = ModelRole(role_name)
+                # 根据角色决定使用哪个接口加载
+                if role in (ModelRole.CHAT, ModelRole.FALLBACK_CHAT):
+                    # LangChain 接口（用于 Agent）
+                    instance = await _load_model_for_role(name, provider, api_key_env, base_url_env, "langchain")
+                else:
+                    # LlamaIndex 接口（用于检索）
+                    instance = await _load_model_for_role(name, provider, api_key_env, base_url_env, "llama_index")
+
+                spec = ModelSpec(
+                    name=name,
+                    provider=provider,
+                    roles=[role],
+                    api_key_env=api_key_env,
+                    base_url_env=base_url_env,
+                    is_primary=is_primary,
+                )
+                await gateway.register_model(spec, instance)
+
+                # 连通性检查（仅主模型启动时验证）
+                if is_primary and role == ModelRole.CHAT:
+                    try:
+                        await instance.ainvoke([{"role": "user", "content": "ping"}])
+                        logger.info(f"[主模型] ✅ {name} 联通正常")
+                    except Exception as e:
+                        logger.warning(f"[主模型] ❌ {name} 不可用: {e}")
+
+        # 设置降级链
+        for role_name, chain in fallback_chains.items():
+            gateway.set_fallback_chain(ModelRole(role_name), chain)
+
+        # 启动后台健康探活
+        await gateway.start_probe(interval_seconds=probe_config.get("interval_seconds", 30.0))
+
+        app.state.model_gateway = gateway
+
+        # ── 本地模型（embedding + rerank，不受 gateway 管理） ──
+        embed_model = await AsyncLoadModel.async_local_load_embed_model(embed_model_path_dir)
+        rerank_model = await AsyncLoadModel.async_local_load_rerank_model(rerank_model_path_dir)
+
+        # ── 向后兼容：保留旧 knowledge_resources 结构 ──────
+        app.state.knowledge_resources = {
+            "embed_model": embed_model,
+            "rerank_model": rerank_model,
+            "langchain_chat_llm": None,   # 由 gateway 管理
+            "llama_chat_llm": None,       # 由 gateway 管理
+            "langchain_fallback_chat_llm": None,  # 由 gateway 管理
+            "llama_fallback_chat_llm": None,      # 由 gateway 管理
+        }
+
+        # 初始化统一检索管道（传入 gateway）
         pipeline = RetrievalPipeline(
-            embed_model=app.state.knowledge_resources["embed_model"],
-            rerank_model=app.state.knowledge_resources["rerank_model"],
-            llama_llm=app.state.knowledge_resources["llama_chat_llm"],
+            embed_model=embed_model,
+            rerank_model=rerank_model,
+            fallback_llm=None,  # gateway 动态提供 rewriter LLM
             enable_rewriter=True,
             enable_fusion=True,
             top_k=10,
+            gateway=gateway,
         )
-        # 注册所有资源（含管道）到工具模块
+        # 注册资源到工具模块（传入 gateway）
         register_knowledge_resource(
-            embed_model=app.state.knowledge_resources["embed_model"],
-            rerank_model=app.state.knowledge_resources["rerank_model"],
-            llama_chat_model=app.state.knowledge_resources["llama_chat_llm"],
+            embed_model=embed_model,
+            rerank_model=rerank_model,
+            llama_chat_model=None,  # gateway 动态提供
             retrieval_pipeline=pipeline,
+            gateway=gateway,
         )
     except Exception as e:
         logger.critical(f"知识库资源初始化失败: {e}", exc_info=True)
 
     # 发现 Specialist Sub-Agents（用于多 Agent 编排）
     try:
-        subagents = discover_specialist_agents()
+        subagents = discover_specialist_agents(tools_map=tools_map)
         app.state.specialist_subagents = subagents
         logger.info("[main] 发现 %d 个 Specialist Agent", len(subagents))
     except Exception as e:
@@ -165,19 +277,19 @@ async def lifespan(app: FastAPI):
     # ── 创建单例 Agent（共享 CompiledStateGraph，所有会话复用） ──
     try:
         subagents = app.state.specialist_subagents
-        router_prompt = build_router_system_prompt(BASE_SYSTEM_PROMPT, subagents)
         app.state.agent = await async_create_agent(
             langchain_chat_model_name,
             fallback_model_name,
             tools,
-            system_prompt=router_prompt,
+            system_prompt=BASE_SYSTEM_PROMPT,
             checkpointer=app.state.checkpointer,
             store=app.state.store,
             context_schema=ChatContext,
             subagents=subagents,
+            gateway=gateway,  # 注入智能网关
         )
         logger.info(
-            "[main] 单例 Agent 创建完成 (subagents=%d)",
+            "[main] 单例 Agent 创建完成 (subagents=%d, gateway=enabled)",
             len(subagents),
         )
     except Exception as e:
@@ -204,6 +316,9 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时清理资源
     print("应用关闭中...")
+    # 停止网关健康探活
+    if hasattr(app.state, 'model_gateway'):
+        await app.state.model_gateway.stop_probe()
     await pg_db_manager.close()
     await milvus_db_manager.close()
     await redis_manager.close()
@@ -222,6 +337,7 @@ app.include_router(auth_routes.router)
 app.include_router(session_routes.router)
 app.include_router(upload_routes.router)
 app.include_router(document_routes.router)
+app.include_router(admin_router)
 
 async def generate_sessions_title(user_message: str, assistant_message: str, llm) -> str:
     if not assistant_message:
@@ -341,7 +457,15 @@ async def chat_endpoint(request: ChatRequest, current_user: int = Depends(get_cu
                     logger.warning(f"序列化 sources 失败: {e}")
             if is_new_session:
                 try:
-                    llm = app.state.knowledge_resources.get("langchain_chat_llm")
+                    # 从 gateway 获取标题生成用 LLM（优先回退链中的模型）
+                    llm = None
+                    gateway = getattr(app.state, 'model_gateway', None)
+                    if gateway is not None:
+                        chain = gateway.get_model_chain(ModelRole.FALLBACK_CHAT)
+                        if chain:
+                            llm = chain[0][1]
+                    if llm is None:
+                        llm = app.state.knowledge_resources.get("langchain_fallback_chat_llm")
                     title = await generate_sessions_title(request.message, assistant_message, llm)
                     await pg_db_manager.create_user_session(current_user, session_id, title)
                 except Exception as e:

@@ -1,0 +1,114 @@
+# app/gateway/gateway_middleware.py — 智能网关中间件
+"""替换 ModelFallbackMiddleware，实现健康感知智能路由。
+
+与 ModelFallbackMiddleware 的关键区别:
+    - 每次模型调用都从 Gateway 动态获取模型链（而非静态 fallback 列表）
+    - 自动跳过已熔断（OPEN）的模型
+    - 记录每次调用的延迟和成败到 Gateway
+    - 模型链顺序由 Gateway 实时决定（受 Admin API 热切换影响）
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import TYPE_CHECKING, Any
+
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    ContextT,
+    ModelRequest,
+    ModelResponse,
+    ResponseT,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.model_gateway import ModelGateway
+    from app.gateway.types import ModelRole
+
+logger = logging.getLogger(__name__)
+
+
+class GatewayMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, ResponseT]):
+    """基于 ModelGateway 的智能模型路由中间件。
+
+    每次模型调用时:
+        1. 从 Gateway 获取健康排序的模型链
+        2. 跳过已熔断的模型
+        3. 逐个尝试，直到成功
+        4. 记录延迟和成败
+
+    Usage:
+        # 替换原来的 ModelFallbackMiddleware
+        middleware = [
+            GatewayMiddleware(gateway=gateway, role=ModelRole.CHAT),
+        ]
+    """
+
+    def __init__(self, gateway: ModelGateway, role: ModelRole) -> None:
+        """初始化智能路由中间件。
+
+        Args:
+            gateway: 模型网关单例。
+            role: 此中间件服务的角色（决定使用哪个模型链）。
+        """
+        super().__init__()
+        self.gateway = gateway
+        self.role = role
+
+    # ── 同步版本（未使用，但必须实现以避免 NotImplementedError） ──
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[ContextT],
+        handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
+    ) -> ModelResponse[ResponseT] | AIMessage:
+        """同步版本 — 直接委托给 handler（代理在 async 路径上）。"""
+        return handler(request)
+
+    # ── 异步版本（实际使用） ──────────────────────────────────
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[ContextT],
+        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
+    ) -> ModelResponse[ResponseT] | AIMessage:
+        """健康感知模型路由。
+
+        从 Gateway 获取模型链，逐个尝试直到成功或全部失败。
+        """
+        model_chain = self.gateway.get_model_chain(self.role)
+
+        if not model_chain:
+            # 没有可用模型，直接调用 handler（使用 request 中的原始模型）
+            logger.warning("[GatewayMiddleware] 无可用模型链，使用原始模型")
+            return await handler(request)
+
+        last_error: Exception | None = None
+
+        for model_name, model_instance in model_chain:
+            try:
+                start = time.monotonic()
+                result = await handler(request.override(model=model_instance))
+                latency = (time.monotonic() - start) * 1000
+                await self.gateway.record_success(model_name, latency)
+                return result
+            except Exception as e:
+                await self.gateway.record_failure(model_name, str(e))
+                last_error = e
+                logger.warning(
+                    "[GatewayMiddleware] %s 调用失败: %s，尝试下一个",
+                    model_name,
+                    e,
+                )
+
+        # 所有模型都失败
+        if last_error is not None:
+            raise last_error
+        # 理论上不可达（model_chain 为空已在上面处理）
+        return await handler(request)

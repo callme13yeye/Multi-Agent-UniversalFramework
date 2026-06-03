@@ -106,6 +106,4 @@ def _create_node_parser_by_user(user_choice: str, embed_model: HuggingFaceEmbedd
         return UnstructuredElementNodeParser(llm=llm)
     if user_choice == "sentence_splitter":
         return SentenceSplitter(chunk_size=512, chunk_overlap=50, include_metadata=True)
-    if user_choice == "unstructured":
-        return UnstructuredElementNodeParser(llm=llm)
     raise ValueError(f"未知的 parser 名称: {user_choice}")

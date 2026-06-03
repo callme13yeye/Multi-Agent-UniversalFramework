@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Dict
+from typing import Dict, Any
 from dotenv import load_dotenv
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -29,35 +29,55 @@ load_dotenv("key.env")
 
 # 异步调用
 class AsyncLoadModel:
-    _langchain_chat_models: Dict[str, any] = {}
-    _llama_chat_models: Dict[str, any] = {}
-    _fallback_model: Dict[str, any] = {}
-    _embed_models: Dict[str, any] = {}
-    _rerank_models: Dict[str, any] = {}
-    
+    _langchain_chat_models: Dict[str, Any] = {}
+    _llama_chat_models: Dict[str, Any] = {}
+    _langchain_fallback_models: Dict[str, Any] = {}
+    _llama_fallback_models: Dict[str, Any] = {}
+    _embed_models: Dict[str, Any] = {}
+    _rerank_models: Dict[str, Any] = {}
+
     _langchain_chat_locks: Dict[str, asyncio.Lock] = {}
     _llama_chat_locks: Dict[str, asyncio.Lock] = {}
-    _fallback_locks: Dict[str, asyncio.Lock] = {}
+    _langchain_fallback_locks: Dict[str, asyncio.Lock] = {}
+    _llama_fallback_locks: Dict[str, asyncio.Lock] = {}
     _embed_locks: Dict[str, asyncio.Lock] = {}
     _rerank_locks: Dict[str, asyncio.Lock] = {}
 
     
     @classmethod
-    async def async_fallback_api_model(cls, model: str):
-        if model in cls._fallback_model:
-            return cls._fallback_model[model]
-        async with cls._fallback_locks.setdefault(model, asyncio.Lock()):
-            if model in cls._fallback_model:
-                return cls._fallback_model[model]
-            modelscope_api_key = os.getenv("MODELSCOPE_API_KEY")
-            modelscope_base_url = os.getenv("MODELSCOPE_BASE_URL")
+    async def async_langchain_fallback_api_model(cls, model: str):
+        if model in cls._langchain_fallback_models:
+            return cls._langchain_fallback_models[model]
+        async with cls._langchain_fallback_locks.setdefault(model, asyncio.Lock()):
+            if model in cls._langchain_fallback_models:
+                return cls._langchain_fallback_models[model]
+            modelscope_api_key = os.getenv("BAILIAN_API_KEY")
+            modelscope_base_url = os.getenv("BAILIAN_BASE_URL")
             model_instance = init_chat_model(
                 model,
                 model_provider="openai",
                 api_key=modelscope_api_key,
                 base_url=modelscope_base_url,
             )
-            cls._fallback_model[model] = model_instance
+            cls._langchain_fallback_models[model] = model_instance
+            return model_instance
+        
+    @classmethod
+    async def async_llama_fallback_api_model(cls, model: str) -> OpenAILike:
+        if model in cls._llama_fallback_models:
+            return cls._llama_fallback_models[model]
+        async with cls._llama_fallback_locks.setdefault(model, asyncio.Lock()):
+            if model in cls._llama_fallback_models:
+                return cls._llama_fallback_models[model]
+            modelscope_api_key = os.environ.get("BAILIAN_API_KEY")
+            modelscope_base_url = os.environ.get("BAILIAN_BASE_URL")
+            model_instance = OpenAILike(
+                model=model,
+                api_key=modelscope_api_key,
+                api_base=modelscope_base_url,
+                is_chat_model=True,
+            )
+            cls._llama_fallback_models[model] = model_instance
             return model_instance
     
     @classmethod
@@ -77,25 +97,6 @@ class AsyncLoadModel:
             )
             cls._langchain_chat_models[model] = model_instance
             return model_instance
-
-    # # llamaindex openailike api
-    # @classmethod
-    # async def async_llama_index_api_model(cls, model: str) -> OpenAILike:
-    #     if model in cls._llama_chat_models:
-    #         return cls._llama_chat_models[model]
-    #     async with cls._llama_chat_locks.setdefault(model, asyncio.Lock()):
-    #         if model in cls._llama_chat_models:
-    #             return cls._llama_chat_models[model]
-    #         modelscope_api_key = os.environ.get("MODELSCOPE_API_KEY")
-    #         modelscope_base_url = os.environ.get("MODELSCOPE_BASE_URL")
-    #         model_instance = OpenAILike(
-    #             model=model,
-    #             api_key=modelscope_api_key,
-    #             api_base=modelscope_base_url,
-    #             is_chat_model=True,
-    #         )
-    #         cls._llama_chat_models[model] = model_instance
-    #         return model_instance
 
     @classmethod
     async def async_llama_index_api_model(cls, model: str) -> DeepSeek:
@@ -131,6 +132,7 @@ class AsyncLoadModel:
             )
             cls._embed_models[embed_model_path] = embed_model
             return embed_model
+        
     @staticmethod
     def _load_embed_model_sync(embed_model_path: str):
         return HuggingFaceEmbedding(
@@ -156,6 +158,7 @@ class AsyncLoadModel:
             )
             cls._rerank_models[rerank_model_path] = rerank_model
             return rerank_model
+        
     @staticmethod
     def _load_rerank_model_sync(rerank_model_path: str):
         return SentenceTransformerRerank(
@@ -163,3 +166,23 @@ class AsyncLoadModel:
             model=rerank_model_path,
             device="cpu"
         )
+
+    # ── 缓存失效（供 ModelGateway 热切换用） ──────────────────
+
+    @classmethod
+    def invalidate(cls, model_name: str) -> None:
+        """清除指定模型名称的所有缓存条目。
+
+        ModelGateway 在热切换或强制重载模型时调用此方法，
+        确保下次请求重新从 API 加载模型实例。
+
+        Args:
+            model_name: 要清除的模型名称，如 ``"deepseek-v4-flash"``。
+        """
+        for cache_dict in [
+            cls._langchain_chat_models,
+            cls._llama_chat_models,
+            cls._langchain_fallback_models,
+            cls._llama_fallback_models,
+        ]:
+            cache_dict.pop(model_name, None)

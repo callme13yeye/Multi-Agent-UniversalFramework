@@ -8,8 +8,18 @@ agent_definitions.py — Specialist SubAgent 定义。
 
     from app.agent_definitions import discover_specialist_agents
 
-    subagents = discover_specialist_agents(all_tools)
+    # tools_map: 工具名 → 工具对象，用于按 AGENT.md 的 allowed_tools 分组
+    subagents = discover_specialist_agents(tools_map={
+        "async_knowledge_query_ask": knowledge_query_tool,
+        "async_web_search": web_search_tool,
+        ...
+    })
     agent = await async_create_agent(..., subagents=subagents)
+
+路由方式：
+    SubAgent 列表通过 SubAgentMiddleware 注入到 system prompt 和
+    ``task`` 工具的参数描述中。LLM 通过 Function Calling 自行选择
+    合适的 Specialist Agent，无需额外的路由函数或分类器。
 """
 
 from __future__ import annotations
@@ -75,11 +85,18 @@ def _parse_agent_md(file_path: Path) -> dict[str, Any]:
 
 def discover_specialist_agents(
     skills_dir: str | None = None,
+    tools_map: dict[str, Any] | None = None,
 ) -> list[SubAgent]:
     """扫描 skills 目录下的 AGENT.md，构建 Specialist SubAgent 列表。
 
+    根据 AGENT.md 中声明的 ``allowed_tools`` 精确分配工具——每个
+    Specialist Agent 只拿到自己需要的工具，减少上下文中工具描述
+    的 token 占用。
+
     Args:
         skills_dir: skills 根目录（默认自动定位到 app/skills/）。
+        tools_map: ``{工具名: 工具对象}`` 映射。为 None 时所有
+            SubAgent 继承父 Agent 的全部工具（向后兼容）。
 
     Returns:
         SubAgent 列表，可直接传给 ``create_deep_agent(subagents=...)``。
@@ -101,52 +118,42 @@ def discover_specialist_agents(
         try:
             spec = _parse_agent_md(agent_file)
 
-            # 不显式传 tools → 继承父 Agent 的全部工具
-            # 不传 model → 继承父 Agent 的模型
-            # 不传 middleware → create_deep_agent 构建默认中间件
             agent_def: SubAgent = {
                 "name": spec["name"],
                 "description": spec["description"],
                 "system_prompt": spec["system_prompt"],
             }
+
+            # 工具分组：按 AGENT.md 的 allowed_tools 精确分配
+            allowed_names = spec["allowed_tools"]
+            if allowed_names and tools_map:
+                subagent_tools = [
+                    tools_map[name]
+                    for name in allowed_names
+                    if name in tools_map
+                ]
+                if subagent_tools:
+                    agent_def["tools"] = subagent_tools
+                    logger.info(
+                        "发现 Specialist Agent: %s — %s | tools=%s",
+                        spec["name"],
+                        spec["description"][:60],
+                        allowed_names,
+                    )
+                else:
+                    logger.warning(
+                        "Specialist Agent %s 的 allowed_tools 未匹配到任何工具，将继承父 Agent 全部工具",
+                        spec["name"],
+                    )
+            else:
+                # 未声明 allowed_tools 或未提供 tools_map → 继承父 Agent 全部工具
+                logger.info(
+                    "发现 Specialist Agent: %s — %s（继承全部工具）",
+                    spec["name"],
+                    spec["description"][:60],
+                )
             agents.append(agent_def)
-            logger.info(
-                "发现 Specialist Agent: %s — %s",
-                spec["name"],
-                spec["description"][:60],
-            )
         except Exception as e:
             logger.warning("加载 %s 失败: %s", agent_file.name, e)
 
     return agents
-
-
-# ── 构建 Router System Prompt ─────────────────────────────
-
-def build_router_system_prompt(
-    base_prompt: str,
-    subagents: list[SubAgent],
-) -> str:
-    """在基础 system prompt 后追加可用 Specialist Agent 列表。"""
-    if not subagents:
-        return base_prompt
-
-    agent_lines = "\n".join(
-        f"- `{a['name']}`: {a['description']}"
-        for a in subagents
-    )
-    router_instructions = f"""
-
-## 可用 Specialist Agent
-
-你可以使用 ``task`` 工具将任务委托给以下 Specialist Agent：
-
-{agent_lines}
-
-**使用规则：**
-- 当用户问题明确属于某个领域时，委托给对应的 Specialist Agent 处理
-- 当问题跨领域时，选择最相关的 Specialist Agent
-- 简单问题（问时间、打招呼、通用知识）由你自己直接回答，无需委托
-- 委托后，将 Specialist Agent 的返回结果转达给用户
-"""
-    return base_prompt + router_instructions
