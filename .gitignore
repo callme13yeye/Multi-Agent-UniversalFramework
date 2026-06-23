@@ -30,3 +30,7 @@ models/
 
 # Logs
 *.log
+
+# UV
+uv.lock
+.pytest_cache/

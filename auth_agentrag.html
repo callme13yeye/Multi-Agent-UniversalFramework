@@ -433,6 +433,268 @@
             80% { opacity: 1; }
             100% { opacity: 0; }
         }
+
+        /* ---- 实时状态框 ---- */
+        .status-box {
+            margin-top: 8px;
+            min-height: 28px;
+            font-size: 13px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            align-items: center;
+        }
+        .status-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 14px;
+            background: #f8fafc;
+            border: 1px solid #eef2ff;
+            white-space: nowrap;
+            animation: statusIn 0.3s ease;
+        }
+        .status-item.removing {
+            animation: statusOut 0.3s ease forwards;
+        }
+        @keyframes statusIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes statusOut {
+            from { opacity: 1; max-height: 40px; }
+            to { opacity: 0; max-height: 0; padding: 0 8px; margin: 0; }
+        }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+            background: #4b6cb7;
+        }
+        .status-dot.thinking { background: #4b6cb7; animation: pulse 1.2s infinite; }
+        .status-dot.retrieving,
+        .status-dot.searching,
+        .status-dot.executing_task { background: #d97706; animation: pulse 1.2s infinite; }
+        .status-dot.generating { background: #16a34a; animation: pulse 1.2s infinite; }
+        .status-dot.retrying { background: #dc2626; animation: pulse 0.4s infinite; }
+        .status-dot.completed,
+        .status-dot.indexed { background: #16a34a; }
+        .status-dot.failed { background: #dc2626; }
+        .status-dot.downloading,
+        .status-dot.loading,
+        .status-dot.cleaning,
+        .status-dot.splitting,
+        .status-dot.indexing,
+        .status-dot.storing,
+        .status-dot.queuing { background: #d97706; animation: pulse 1.2s infinite; }
+        .status-label {
+            flex: 1; color: #475569; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .status-filename {
+            font-size: 11px; color: #94a3b8; flex-shrink: 0;
+            max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .status-close-btn {
+            background: none; border: none; font-size: 14px; cursor: pointer;
+            color: #94a3b8; padding: 0 4px; border-radius: 4px; flex-shrink: 0;
+        }
+        .status-close-btn:hover { background: #f1f5f9; color: #475569; }
+
+        /* ---- 任务管理模态框 ---- */
+        .task-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); display: flex;
+            align-items: center; justify-content: center; z-index: 2000;
+        }
+        .task-modal {
+            background: white; width: 90vw; max-width: 1100px; height: 85vh;
+            border-radius: 24px; padding: 28px 32px;
+            box-shadow: 0 20px 35px -8px rgba(0,0,0,0.2);
+            display: flex; flex-direction: column;
+        }
+        .task-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 16px; flex-shrink: 0;
+        }
+        .task-header h2 { font-size: 22px; font-weight: 600; }
+        .task-header-actions { display: flex; gap: 8px; align-items: center; }
+        .task-refresh-btn {
+            padding: 8px 16px; border: 1px solid #e2e8f0; border-radius: 20px;
+            background: white; font-size: 13px; cursor: pointer; transition: 0.2s; color: #475569;
+        }
+        .task-refresh-btn:hover { background: #f1f5f9; border-color: #cbd5e1; }
+        .task-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .task-close-btn {
+            width: 36px; height: 36px; border-radius: 50%; border: none;
+            background: #f1f5f9; font-size: 18px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: 0.2s; color: #475569;
+        }
+        .task-close-btn:hover { background: #e2e8f0; }
+
+        /* 状态筛选标签 */
+        .task-filters {
+            display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; flex-shrink: 0;
+        }
+        .task-filter-chip {
+            padding: 6px 14px; border-radius: 20px; border: 1px solid #e2e8f0;
+            background: white; font-size: 12px; cursor: pointer; transition: 0.2s; color: #475569;
+            font-weight: 500; white-space: nowrap;
+        }
+        .task-filter-chip:hover { background: #f1f5f9; border-color: #cbd5e1; }
+        .task-filter-chip.active {
+            background: #eef2ff; border-color: #4b6cb7; color: #4b6cb7;
+        }
+        .task-filter-chip .count {
+            margin-left: 4px; font-size: 11px; background: #f1f5f9;
+            padding: 1px 6px; border-radius: 10px; color: #64748b;
+        }
+        .task-filter-chip.active .count { background: #c7d2fe; color: #3730a3; }
+
+        /* 表格容器 */
+        .task-table-wrap {
+            flex: 1; overflow-y: auto; border: 1px solid #eef2ff;
+            border-radius: 16px;
+        }
+        .task-table {
+            width: 100%; border-collapse: collapse; font-size: 14px;
+        }
+        .task-table th {
+            background: #f8fafc; padding: 10px 14px; text-align: left;
+            font-weight: 600; color: #475569; border-bottom: 1px solid #e2e8f0;
+            position: sticky; top: 0; z-index: 1;
+        }
+        .task-table td {
+            padding: 10px 14px; border-bottom: 1px solid #f1f5f9;
+            color: #334155; vertical-align: middle;
+        }
+        .task-table tr:hover td { background: #fafcff; }
+        .task-table .col-t-goal { min-width: 200px; }
+        .task-table .col-t-status { width: 100px; }
+        .task-table .col-t-progress { width: 200px; min-width: 140px; }
+        .task-table .col-t-time { width: 100px; }
+        .task-table .col-t-actions { width: 120px; }
+
+        /* 任务状态徽章 */
+        .task-status-badge {
+            display: inline-block; padding: 2px 10px; border-radius: 40px;
+            font-size: 12px; font-weight: 500;
+        }
+        .task-status-created { background: #f1f5f9; color: #64748b; }
+        .task-status-planning { background: #dbeafe; color: #2563eb; }
+        .task-status-executing { background: #fef3c7; color: #d97706; }
+        .task-status-waiting_human,
+        .task-status-waiting_event { background: #fce7f3; color: #db2777; }
+        .task-status-completed { background: #dcfce7; color: #16a34a; }
+        .task-status-failed { background: #fee2e2; color: #dc2626; }
+        .task-status-cancelled { background: #f1f5f9; color: #94a3b8; text-decoration: line-through; }
+
+        /* 进度条 */
+        .task-progress-bar-wrap {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .task-progress-bar {
+            flex: 1; height: 6px; background: #f1f5f9;
+            border-radius: 3px; overflow: hidden;
+        }
+        .task-progress-bar-fill {
+            height: 100%; border-radius: 3px; transition: width 0.5s ease;
+            background: linear-gradient(90deg, #4b6cb7, #818cf8);
+        }
+        .task-progress-text {
+            font-size: 12px; color: #64748b; flex-shrink: 0;
+            min-width: 55px; text-align: right;
+        }
+
+        /* 任务操作按钮 */
+        .task-action-btn {
+            padding: 4px 10px; border-radius: 20px; border: 1px solid #e2e8f0;
+            font-size: 12px; cursor: pointer; transition: 0.2s; background: white;
+            color: #475569; margin-right: 4px;
+        }
+        .task-action-btn:hover { background: #f1f5f9; border-color: #cbd5e1; }
+        .task-action-btn-detail:hover { background: #eef2ff; border-color: #4b6cb7; color: #4b6cb7; }
+        .task-action-btn-cancel:hover { background: #fee2e2; border-color: #dc2626; color: #dc2626; }
+
+        /* 任务详情面板 */
+        .task-detail-panel {
+            flex-shrink: 0; border-top: 1px solid #e5e7eb;
+            margin-top: 16px; padding-top: 16px;
+            display: none;
+        }
+        .task-detail-panel.open { display: block; }
+        .task-detail-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+            margin-bottom: 16px;
+        }
+        .task-detail-grid .detail-item {
+            background: #f8fafc; padding: 12px 16px;
+            border-radius: 12px; border: 1px solid #eef2ff;
+        }
+        .task-detail-grid .detail-label {
+            font-size: 11px; color: #94a3b8; font-weight: 500; margin-bottom: 4px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .task-detail-grid .detail-value {
+            font-size: 14px; color: #1e293b; font-weight: 500; word-break: break-word;
+        }
+        .task-detail-grid .detail-value.full-width { grid-column: 1 / -1; }
+        .task-plan-list {
+            list-style: none; padding: 0; margin: 0;
+        }
+        .task-plan-list li {
+            padding: 8px 12px; margin-bottom: 6px; background: white;
+            border-radius: 8px; border: 1px solid #eef2ff; font-size: 13px;
+            display: flex; gap: 8px;
+        }
+        .task-plan-list .plan-step-num {
+            width: 22px; height: 22px; border-radius: 50%;
+            background: #eef2ff; color: #4b6cb7; font-size: 12px; font-weight: 600;
+            display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+        }
+        .task-plan-list .plan-step-text { flex: 1; color: #334155; padding-top: 1px; }
+
+        /* 审批操作区 */
+        .task-approval-area {
+            background: #fefce8; border: 1px solid #fde68a;
+            border-radius: 16px; padding: 20px 24px;
+            margin-top: 16px;
+        }
+        .task-approval-area h3 {
+            font-size: 15px; font-weight: 600; color: #92400e; margin-bottom: 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .task-approval-question {
+            font-size: 14px; color: #78350f; margin-bottom: 16px;
+            padding: 12px 16px; background: #fffbeb; border-radius: 8px;
+            border: 1px solid #fde68a; line-height: 1.6;
+        }
+        .task-approval-actions { display: flex; gap: 12px; }
+        .task-approve-btn {
+            padding: 10px 24px; border-radius: 24px; border: none;
+            font-size: 14px; font-weight: 500; cursor: pointer; transition: 0.2s;
+        }
+        .task-approve-btn.approve {
+            background: #16a34a; color: white;
+        }
+        .task-approve-btn.approve:hover { background: #15803d; }
+        .task-approve-btn.reject {
+            background: #dc2626; color: white;
+        }
+        .task-approve-btn.reject:hover { background: #b91c1c; }
+        .task-approval-comment {
+            width: 100%; padding: 10px 16px; border: 1px solid #e2e8f0;
+            border-radius: 12px; font-size: 14px; margin-bottom: 12px;
+            resize: vertical; min-height: 60px; font-family: inherit;
+        }
+        .task-approval-comment:focus { outline: none; border-color: #4b6cb7; box-shadow: 0 0 0 3px rgba(75,108,183,0.1); }
+
+        .task-detail-close {
+            margin-top: 12px; padding: 6px 16px; border: 1px solid #e2e8f0;
+            border-radius: 20px; background: white; font-size: 13px;
+            cursor: pointer; color: #64748b; transition: 0.2s;
+        }
+        .task-detail-close:hover { background: #f1f5f9; }
     </style>
 </head>
 <body>
@@ -441,6 +703,7 @@
         <div class="sidebar-header">
             <button class="new-chat-btn" id="newChatBtn">✨ 开启新对话</button>
             <button class="kb-btn" id="kbBtn">📚 知识库管理</button>
+            <button class="kb-btn" id="taskBtn">📋 任务管理</button>
         </div>
         <div class="history-list" id="historyList">
             <div style="padding: 20px; text-align: center; color: #94a3b8; font-size: 13px;">登录后同步会话记录</div>
@@ -464,6 +727,7 @@
                 <button class="tool-btn upload-btn" id="uploadFileBtn">📎 上传文档</button>
                 <div style="font-size:12px; color:#64748b;" id="uploadStatus"></div>
             </div>
+            <div class="status-box" id="statusBox"></div>
             <div class="input-wrapper">
                 <textarea id="messageInput" rows="1" placeholder="输入消息..." style="resize: none;"></textarea>
                 <button id="sendBtn">发送</button>
@@ -500,9 +764,17 @@
         let kbTotalDocs = 0;
         let kbDocuments = [];
         let kbEventSource = null;
+        let docStatusSource = null;  // 持久化的文档状态 SSE
 
         // 文件预览状态
         let previewBlobUrl = null;
+
+        // 任务管理状态
+        let taskFilterStatus = '';           // 当前状态筛选
+        let taskList = [];                   // 任务列表
+        let taskDetailId = null;             // 当前查看的任务ID
+        let taskRefreshTimer = null;         // 自动刷新定时器
+        let taskEventSource = null;          // SSE 连接（全局任务状态变更）
 
         const DOM = {
             sidebar: document.getElementById('sidebar'),
@@ -514,8 +786,10 @@
             newChatBtn: document.getElementById('newChatBtn'),
             uploadFileBtn: document.getElementById('uploadFileBtn'),
             uploadStatus: document.getElementById('uploadStatus'),
+            statusBox: document.getElementById('statusBox'),
             sessionIndicator: document.getElementById('sessionIndicator'),
             kbBtn: document.getElementById('kbBtn'),
+            taskBtn: document.getElementById('taskBtn'),
         };
 
         function generateUUID() {
@@ -550,6 +824,79 @@
             const k = 1024;
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + units[i];
+        }
+
+        // =============================================================
+        //  实时状态框
+        // =============================================================
+        const STATUS_LABELS = {
+            'thinking': '思考中...',
+            'retrieving': '知识检索中...',
+            'searching': '联网搜索中...',
+            'executing_task': '执行任务中...',
+            'generating': '生成回答中...',
+            'retrying': '重试中...',
+            'queuing': '排队中...',
+            'downloading': '下载文档中...',
+            'loading': '解析文档中...',
+            'cleaning': '清洗数据中...',
+            'splitting': '切分节点中...',
+            'indexing': '写入向量库...',
+            'indexed': '索引完成 ✓',
+            'failed': '索引失败 ✗',
+        };
+
+        function addStatusItem(id, label, filename) {
+            const box = DOM.statusBox;
+            if (!box) return;
+            if (box.querySelector(`[data-status-id="${id}"]`)) return;
+            const div = document.createElement('div');
+            div.className = 'status-item';
+            div.dataset.statusId = id;
+            div.innerHTML = `
+                <span class="status-dot" id="dot-${id}"></span>
+                <span class="status-label" id="label-${id}">${escapeHtml(label)}</span>
+                ${filename ? `<span class="status-filename">${escapeHtml(filename)}</span>` : ''}
+                <button class="status-close-btn" onclick="removeStatusItem('${id}')">✕</button>
+            `;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function updateStatusItem(id, label, status) {
+            const box = DOM.statusBox;
+            if (!box) return;
+            const item = box.querySelector(`[data-status-id="${id}"]`);
+            if (!item) {
+                addStatusItem(id, label);
+            }
+            const labelEl = document.getElementById(`label-${id}`);
+            if (labelEl) labelEl.textContent = label;
+            const dot = document.getElementById(`dot-${id}`);
+            if (dot) {
+                dot.className = 'status-dot';
+                if (status) dot.classList.add(status);
+            }
+        }
+
+        function removeStatusItem(id, delay) {
+            const box = DOM.statusBox;
+            if (!box) return;
+            const item = box.querySelector(`[data-status-id="${id}"]`);
+            if (!item) return;
+            if (delay) {
+                item.classList.add('removing');
+                setTimeout(() => { if (item.parentNode) item.remove(); }, delay);
+            } else {
+                item.remove();
+            }
+        }
+
+        function clearChatStatus() {
+            const box = DOM.statusBox;
+            if (!box) return;
+            const item = box.querySelector('[data-status-id="chat-current"]');
+            if (item) item.remove();
         }
 
         function escapeHtml(str) {
@@ -649,6 +996,8 @@
             streamingContent = '';
             isStreaming = false;
             DOM.sendBtn.disabled = false;
+            // 聊天完成后延迟清除状态
+            setTimeout(clearChatStatus, 3000);
         }
 
         function renderHistoryList() {
@@ -791,6 +1140,12 @@
                                     const sessionKey = activeSessionId || newSessionId || currentSessionId;
                                     sourcesMap.set(sessionKey, sources);
                                     currentSources = sources;
+                                    currentEvent = '';
+                                    continue;
+                                }
+                                // Agent 运行时状态事件（用固定 ID，不受 session_id 变化影响）
+                                if (currentEvent === 'status') {
+                                    updateStatusItem('chat-current', parsed.label || parsed.status, parsed.status);
                                     currentEvent = '';
                                     continue;
                                 }
@@ -1016,6 +1371,67 @@
         // =============================================================
         //  知识库管理模块
         // =============================================================
+
+        // =============================================================
+        //  持久化文档状态连接（与知识库管理模态框的连接分离）
+        // =============================================================
+        function connectDocStatusEvents() {
+            if (docStatusSource) docStatusSource.close();
+            if (!token) return;
+            docStatusSource = new EventSource(`http://localhost:8000/documents/events?token=${token}`);
+
+            docStatusSource.addEventListener('status_change', (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    const id = 'doc-' + data.doc_id;
+                    const label = STATUS_LABELS[data.status] || data.status;
+                    const filename = data.filename || '';
+                    if (data.status === 'indexed' || data.status === 'failed') {
+                        updateStatusItem(id, label + ' ' + filename, data.status);
+                        // 完成后 5 秒自动移除
+                        setTimeout(() => removeStatusItem(id, 300), 5000);
+                    } else {
+                        updateStatusItem(id, label, data.status);
+                        // 已有条目时更新文件名在已有条目中
+                        if (filename) {
+                            const box = DOM.statusBox;
+                            const item = box ? box.querySelector(`[data-status-id="${id}"]`) : null;
+                            if (item) {
+                                let fnEl = item.querySelector('.status-filename');
+                                if (!fnEl) {
+                                    fnEl = document.createElement('span');
+                                    fnEl.className = 'status-filename';
+                                    item.insertBefore(fnEl, item.querySelector('.status-close-btn'));
+                                }
+                                fnEl.textContent = filename;
+                            }
+                        }
+                    }
+                } catch(err) { console.warn('文档状态解析失败', err); }
+            });
+
+            docStatusSource.addEventListener('heartbeat', () => {});
+
+            docStatusSource.onerror = () => {
+                if (docStatusSource) {
+                    docStatusSource.close();
+                    docStatusSource = null;
+                }
+                // 断线后 5 秒自动重连
+                if (token) {
+                    setTimeout(() => {
+                        if (token && !docStatusSource) connectDocStatusEvents();
+                    }, 5000);
+                }
+            };
+        }
+
+        function disconnectDocStatusEvents() {
+            if (docStatusSource) {
+                docStatusSource.close();
+                docStatusSource = null;
+            }
+        }
 
         function connectKBEvents() {
             if (kbEventSource) kbEventSource.close();
@@ -1418,6 +1834,577 @@
 
         // 知识库管理按钮
         DOM.kbBtn.addEventListener('click', openKBModal);
+        // 任务管理按钮
+        DOM.taskBtn.addEventListener('click', openTaskModal);
+
+        // =============================================================
+        //  任务管理模块
+        // =============================================================
+        const TASK_STATUS_CONFIG = {
+            'created':       { label: '已创建',   cls: 'task-status-created' },
+            'planning':      { label: '规划中',   cls: 'task-status-planning' },
+            'executing':     { label: '执行中',   cls: 'task-status-executing' },
+            'waiting_human': { label: '待审批',   cls: 'task-status-waiting_human' },
+            'waiting_event': { label: '等待中',   cls: 'task-status-waiting_event' },
+            'completed':     { label: '已完成',   cls: 'task-status-completed' },
+            'failed':        { label: '失败',     cls: 'task-status-failed' },
+            'cancelled':     { label: '已取消',   cls: 'task-status-cancelled' },
+        };
+        const FILTER_CHIPS = [
+            { key: '',                label: '全部' },
+            { key: 'executing',       label: '执行中' },
+            { key: 'waiting_human',   label: '待审批' },
+            { key: 'waiting_event',   label: '等待中' },
+            { key: 'completed',       label: '已完成' },
+            { key: 'failed',         label: '失败' },
+        ];
+
+        function getTaskStatusBadge(status) {
+            const cfg = TASK_STATUS_CONFIG[status] || { label: status, cls: '' };
+            return `<span class="task-status-badge ${cfg.cls}">${cfg.label}</span>`;
+        }
+
+        function openTaskModal() {
+            if (!token) { alert('请先登录'); return; }
+            if (document.querySelector('.task-overlay')) return;
+
+            const overlay = document.createElement('div');
+            overlay.className = 'task-overlay';
+            overlay.id = 'taskOverlay';
+            overlay.innerHTML = `
+                <div class="task-modal">
+                    <div class="task-header">
+                        <h2>📋 任务管理</h2>
+                        <div class="task-header-actions">
+                            <button class="task-refresh-btn" id="taskRefreshBtn">🔄 刷新</button>
+                            <button class="task-close-btn" id="taskCloseBtn">✕</button>
+                        </div>
+                    </div>
+                    <div class="task-filters" id="taskFilters"></div>
+                    <div class="task-table-wrap">
+                        <table class="task-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:50px;">#</th>
+                                    <th class="col-t-goal">任务目标</th>
+                                    <th class="col-t-status">状态</th>
+                                    <th class="col-t-progress">进度</th>
+                                    <th class="col-t-time">更新时间</th>
+                                    <th class="col-t-actions">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="taskTableBody">
+                                <tr><td colspan="6"><div class="empty-state"><div class="icon">⏳</div><div class="text">加载中...</div></div></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="task-detail-panel" id="taskDetailPanel">
+                        <div class="task-detail-grid" id="taskDetailGrid"></div>
+                        <div id="taskApprovalArea"></div>
+                        <button class="task-detail-close" id="taskDetailCloseBtn">收起详情 ▲</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+
+            // 绑定事件
+            overlay.querySelector('#taskCloseBtn').addEventListener('click', closeTaskModal);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) closeTaskModal(); });
+            overlay.querySelector('#taskRefreshBtn').addEventListener('click', fetchTasks);
+            overlay.querySelector('#taskDetailCloseBtn').addEventListener('click', closeTaskDetail);
+
+            // 渲染筛选 chips
+            renderFilterChips();
+
+            // 初始加载
+            fetchTasks();
+            // 开始自动刷新 (每10秒)
+            startTaskAutoRefresh();
+        }
+
+        function closeTaskModal() {
+            stopTaskAutoRefresh();
+            disconnectTaskEvents();
+            const overlay = document.getElementById('taskOverlay');
+            if (overlay) overlay.remove();
+            taskDetailId = null;
+        }
+
+        // ── 筛选 chips ──────────────────────────────────
+        function renderFilterChips() {
+            const container = document.getElementById('taskFilters');
+            if (!container) return;
+
+            // 计算各状态数量
+            const counts = {};
+            FILTER_CHIPS.forEach(c => {
+                if (c.key === '') counts[''] = taskList.length;
+                else counts[c.key] = taskList.filter(t => t.status === c.key).length;
+            });
+
+            container.innerHTML = FILTER_CHIPS.map(chip => {
+                const active = taskFilterStatus === chip.key ? ' active' : '';
+                const count = counts[chip.key] ?? 0;
+                return `<span class="task-filter-chip${active}" data-filter="${chip.key}">
+                    ${chip.label}<span class="count">${count}</span>
+                </span>`;
+            }).join('');
+
+            // 绑定点击
+            container.querySelectorAll('.task-filter-chip').forEach(chip => {
+                chip.addEventListener('click', () => {
+                    taskFilterStatus = chip.dataset.filter;
+                    renderFilterChips();
+                    renderTaskTable();
+                });
+            });
+        }
+
+        // ── 获取任务列表 ────────────────────────────────
+        async function fetchTasks() {
+            const tbody = document.getElementById('taskTableBody');
+            const refreshBtn = document.getElementById('taskRefreshBtn');
+            if (!tbody) return;
+            if (refreshBtn) refreshBtn.disabled = true;
+
+            try {
+                let url = 'http://localhost:8000/tasks';
+                if (taskFilterStatus) url += `?status_filter=${encodeURIComponent(taskFilterStatus)}`;
+
+                const res = await fetch(url, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                taskList = await res.json();
+                renderFilterChips();
+                renderTaskTable();
+            } catch(err) {
+                console.error('获取任务列表失败:', err);
+                tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div class="icon">❌</div><div class="text">加载失败: ${err.message}</div></div></td></tr>`;
+            } finally {
+                if (refreshBtn) refreshBtn.disabled = false;
+            }
+        }
+
+        function renderTaskTable() {
+            const tbody = document.getElementById('taskTableBody');
+            if (!tbody) return;
+
+            // 按筛选条件过滤
+            let filtered = taskList;
+            if (taskFilterStatus) {
+                filtered = taskList.filter(t => t.status === taskFilterStatus);
+            }
+
+            if (!filtered || filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div class="icon">📋</div><div class="text">暂无${taskFilterStatus ? '符合条件' : ''}的任务</div></div></td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.map((t, i) => {
+                const statusBadge = getTaskStatusBadge(t.status);
+                const progressHtml = renderProgressBar(t);
+                const timeStr = formatTime(t.updated_at) || formatTime(t.created_at);
+                const goalPreview = (t.goal || '').length > 60 ? t.goal.slice(0, 60) + '...' : (t.goal || '');
+
+                // 判断可执行的操作
+                const canView = true;
+                const canCancel = ['created', 'executing', 'waiting_human', 'waiting_event'].includes(t.status);
+                const needsApproval = t.status === 'waiting_human';
+
+                return `
+                    <tr ${needsApproval ? 'style="background:#fffbeb;"' : ''}>
+                        <td style="text-align:center;color:#94a3b8;">${i + 1}</td>
+                        <td class="col-t-goal" title="${escapeHtml(t.goal || '')}">${escapeHtml(goalPreview)}</td>
+                        <td class="col-t-status">${statusBadge}</td>
+                        <td class="col-t-progress">${progressHtml}</td>
+                        <td class="col-t-time" style="font-size:12px;color:#64748b;">${timeStr}</td>
+                        <td class="col-t-actions">
+                            <button class="task-action-btn task-action-btn-detail" data-task-id="${t.task_id}">详情</button>
+                            ${canCancel ? `<button class="task-action-btn task-action-btn-cancel" data-task-id="${t.task_id}">取消</button>` : ''}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+
+            // 绑定事件
+            tbody.querySelectorAll('.task-action-btn-detail').forEach(btn => {
+                btn.addEventListener('click', () => viewTaskDetail(btn.dataset.taskId));
+            });
+            tbody.querySelectorAll('.task-action-btn-cancel').forEach(btn => {
+                btn.addEventListener('click', () => cancelTaskConfirm(btn.dataset.taskId));
+            });
+
+            // 如果之前打开了详情，刷新详情
+            if (taskDetailId) {
+                const task = taskList.find(t => t.task_id === taskDetailId);
+                if (task) renderTaskDetail(task);
+            }
+        }
+
+        function renderProgressBar(task) {
+            const status = task.status;
+            if (status === 'completed') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:100%;background:linear-gradient(90deg,#16a34a,#4ade80);"></div></div>
+                    <span class="task-progress-text" style="color:#16a34a;">✅ 完成</span>
+                </div>`;
+            }
+            if (status === 'failed') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:100%;background:linear-gradient(90deg,#dc2626,#f87171);"></div></div>
+                    <span class="task-progress-text" style="color:#dc2626;">❌ 失败</span>
+                </div>`;
+            }
+            if (status === 'cancelled') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:100%;background:#cbd5e1;"></div></div>
+                    <span class="task-progress-text" style="color:#94a3b8;">已取消</span>
+                </div>`;
+            }
+            if (status === 'created' || status === 'planning') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:15%;"></div></div>
+                    <span class="task-progress-text">准备中</span>
+                </div>`;
+            }
+            if (status === 'executing') {
+                // 通过 plan 长度估算进度
+                const planSteps = (task.plan || []).length;
+                const pct = planSteps > 0 ? Math.max(30, Math.floor(100 / (planSteps + 2))) : 50;
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:${pct}%;animation:pulse 1.5s infinite;"></div></div>
+                    <span class="task-progress-text">${task.progress || '执行中...'}</span>
+                </div>`;
+            }
+            if (status === 'waiting_human') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:70%;background:linear-gradient(90deg,#f59e0b,#fbbf24);"></div></div>
+                    <span class="task-progress-text" style="color:#d97706;">⏸ 待审批</span>
+                </div>`;
+            }
+            if (status === 'waiting_event') {
+                return `<div class="task-progress-bar-wrap">
+                    <div class="task-progress-bar"><div class="task-progress-bar-fill" style="width:65%;background:linear-gradient(90deg,#8b5cf6,#a78bfa);"></div></div>
+                    <span class="task-progress-text" style="color:#7c3aed;">⏳ 等待中</span>
+                </div>`;
+            }
+            return `<span style="font-size:12px;color:#64748b;">${task.progress || ''}</span>`;
+        }
+
+        // ── 任务详情 ────────────────────────────────────
+        async function viewTaskDetail(taskId) {
+            const panel = document.getElementById('taskDetailPanel');
+            const grid = document.getElementById('taskDetailGrid');
+            const approvalArea = document.getElementById('taskApprovalArea');
+            if (!panel || !grid) return;
+
+            // 先从本地列表获取
+            let task = taskList.find(t => t.task_id === taskId);
+
+            // 如果本地没有或需要最新数据，从 API 获取
+            try {
+                const res = await fetch(`http://localhost:8000/tasks/${taskId}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (res.ok) {
+                    task = await res.json();
+                    // 更新本地列表
+                    const idx = taskList.findIndex(t => t.task_id === taskId);
+                    if (idx >= 0) taskList[idx] = task;
+                    else taskList.push(task);
+                }
+            } catch(err) {
+                console.error('获取任务详情失败:', err);
+                if (!task) {
+                    alert('获取任务详情失败');
+                    return;
+                }
+            }
+
+            taskDetailId = taskId;
+            renderTaskDetail(task);
+            panel.classList.add('open');
+
+            // 连接到该任务的 SSE 事件流
+            connectTaskEvents(taskId);
+        }
+
+        function renderTaskDetail(task) {
+            const grid = document.getElementById('taskDetailGrid');
+            const approvalArea = document.getElementById('taskApprovalArea');
+            if (!grid) return;
+
+            const planHtml = (task.plan && task.plan.length > 0)
+                ? `<div class="detail-item full-width">
+                    <div class="detail-label">📋 执行计划</div>
+                    <ul class="task-plan-list">
+                        ${task.plan.map((step, i) => `
+                            <li>
+                                <span class="plan-step-num">${i + 1}</span>
+                                <span class="plan-step-text">${escapeHtml(typeof step === 'string' ? step : (step.description || step.goal || JSON.stringify(step)))}</span>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>`
+                : '';
+
+            grid.innerHTML = `
+                <div class="detail-item">
+                    <div class="detail-label">🎯 任务目标</div>
+                    <div class="detail-value">${escapeHtml(task.goal || '')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">📌 状态</div>
+                    <div class="detail-value">${getTaskStatusBadge(task.status)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">🆔 任务 ID</div>
+                    <div class="detail-value" style="font-family:monospace;font-size:12px;">${escapeHtml(task.task_id)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">🧵 线程 ID</div>
+                    <div class="detail-value" style="font-family:monospace;font-size:12px;">${escapeHtml(task.thread_id)}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">⏰ 创建时间</div>
+                    <div class="detail-value">${escapeHtml(task.created_at ? new Date(task.created_at).toLocaleString('zh-CN') : '')}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">🕐 更新时间</div>
+                    <div class="detail-value">${escapeHtml(task.updated_at ? new Date(task.updated_at).toLocaleString('zh-CN') : '')}</div>
+                </div>
+                ${task.progress ? `
+                <div class="detail-item full-width">
+                    <div class="detail-label">📝 当前进度</div>
+                    <div class="detail-value">${escapeHtml(task.progress)}</div>
+                </div>` : ''}
+                ${task.result_summary ? `
+                <div class="detail-item full-width">
+                    <div class="detail-label">✅ 结果摘要</div>
+                    <div class="detail-value" style="line-height:1.6;">${escapeHtml(task.result_summary)}</div>
+                </div>` : ''}
+                ${task.error_message ? `
+                <div class="detail-item full-width">
+                    <div class="detail-label">❌ 错误信息</div>
+                    <div class="detail-value" style="color:#dc2626;">${escapeHtml(task.error_message)}</div>
+                </div>` : ''}
+                ${planHtml}
+            `;
+
+            // 审批区域
+            if (task.status === 'waiting_human') {
+                const question = task.progress || '需要您的审批决策';
+                approvalArea.innerHTML = `
+                    <div class="task-approval-area">
+                        <h3>🔔 需要您的决策</h3>
+                        <div class="task-approval-question">${escapeHtml(question)}</div>
+                        <textarea class="task-approval-comment" id="taskApprovalComment" placeholder="备注说明（可选）..."></textarea>
+                        <div class="task-approval-actions">
+                            <button class="task-approve-btn approve" id="taskApproveBtn">✅ 批准</button>
+                            <button class="task-approve-btn reject" id="taskRejectBtn">❌ 拒绝</button>
+                        </div>
+                    </div>
+                `;
+                // 绑定审批按钮
+                setTimeout(() => {
+                    document.getElementById('taskApproveBtn')?.addEventListener('click', () => resumeTask(task.task_id, 'approved'));
+                    document.getElementById('taskRejectBtn')?.addEventListener('click', () => resumeTask(task.task_id, 'rejected'));
+                }, 0);
+            } else {
+                approvalArea.innerHTML = '';
+            }
+        }
+
+        function closeTaskDetail() {
+            const panel = document.getElementById('taskDetailPanel');
+            if (panel) panel.classList.remove('open');
+            taskDetailId = null;
+            disconnectTaskEvents();
+        }
+
+        // ── 审批/恢复任务 ───────────────────────────────
+        async function resumeTask(taskId, action) {
+            const comment = document.getElementById('taskApprovalComment')?.value || '';
+            const approveBtn = document.getElementById('taskApproveBtn');
+            const rejectBtn = document.getElementById('taskRejectBtn');
+
+            if (approveBtn) approveBtn.disabled = true;
+            if (rejectBtn) rejectBtn.disabled = true;
+
+            try {
+                const res = await fetch(`http://localhost:8000/tasks/${taskId}/resume`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        action: action,
+                        comment: comment || null,
+                    }),
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                const updatedTask = await res.json();
+
+                // 更新本地列表
+                const idx = taskList.findIndex(t => t.task_id === taskId);
+                if (idx >= 0) taskList[idx] = updatedTask;
+
+                renderFilterChips();
+                renderTaskTable();
+                renderTaskDetail(updatedTask);
+
+                // 显示操作结果
+                const approvalArea = document.getElementById('taskApprovalArea');
+                if (approvalArea) {
+                    approvalArea.innerHTML = `<div style="padding:12px;text-align:center;color:#16a34a;font-weight:500;">
+                        ✅ 已${action === 'approved' ? '批准' : action === 'rejected' ? '拒绝' : '提交'}，任务继续执行中...
+                    </div>`;
+                    setTimeout(() => {
+                        if (taskDetailId === taskId) approvalArea.innerHTML = '';
+                    }, 3000);
+                }
+            } catch(err) {
+                console.error('操作失败:', err);
+                alert('操作失败: ' + err.message);
+            } finally {
+                if (approveBtn) approveBtn.disabled = false;
+                if (rejectBtn) rejectBtn.disabled = false;
+            }
+        }
+
+        // ── 取消任务 ────────────────────────────────────
+        async function cancelTaskConfirm(taskId) {
+            if (!confirm('确定要取消此任务吗？取消后不可恢复。')) return;
+
+            try {
+                const res = await fetch(`http://localhost:8000/tasks/${taskId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+
+                // 更新本地列表
+                const task = taskList.find(t => t.task_id === taskId);
+                if (task) {
+                    task.status = 'cancelled';
+                    task.updated_at = new Date().toISOString();
+                }
+
+                renderFilterChips();
+                renderTaskTable();
+                if (taskDetailId === taskId) closeTaskDetail();
+            } catch(err) {
+                console.error('取消任务失败:', err);
+                alert('取消任务失败: ' + err.message);
+            }
+        }
+
+        // ── SSE 实时事件流 ──────────────────────────────
+        function connectTaskEvents(taskId) {
+            disconnectTaskEvents();
+            if (!token) return;
+
+            taskEventSource = new EventSource(
+                `http://localhost:8000/tasks/${taskId}/events?token=${token}`
+            );
+
+            taskEventSource.addEventListener('task_update', (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    handleTaskEvent(data);
+                } catch(err) {
+                    console.warn('任务事件解析失败', err);
+                }
+            });
+
+            taskEventSource.addEventListener('heartbeat', () => {
+                // 保持连接
+            });
+
+            taskEventSource.onerror = () => {
+                if (taskEventSource) {
+                    taskEventSource.close();
+                    taskEventSource = null;
+                }
+                // 断线后 5 秒自动重连
+                if (taskDetailId && token) {
+                    setTimeout(() => {
+                        if (taskDetailId && token && !taskEventSource) {
+                            connectTaskEvents(taskDetailId);
+                        }
+                    }, 5000);
+                }
+            };
+        }
+
+        function disconnectTaskEvents() {
+            if (taskEventSource) {
+                taskEventSource.close();
+                taskEventSource = null;
+            }
+        }
+
+        function handleTaskEvent(data) {
+            // data 格式: { task_id, status, progress, plan, ... }
+            const taskId = data.task_id;
+            if (!taskId) return;
+
+            // 更新本地列表
+            const idx = taskList.findIndex(t => t.task_id === taskId);
+            if (idx >= 0) {
+                // 合并更新
+                const existing = taskList[idx];
+                taskList[idx] = {
+                    ...existing,
+                    ...data,
+                    status: data.status || existing.status,
+                    progress: data.progress || existing.progress,
+                    result_summary: data.result_summary || existing.result_summary,
+                    error_message: data.error_message || existing.error_message,
+                    plan: data.plan || existing.plan,
+                    updated_at: data.updated_at || new Date().toISOString(),
+                };
+            } else {
+                taskList.push(data);
+            }
+
+            renderFilterChips();
+            renderTaskTable();
+
+            // 如果正在查看该任务，刷新详情
+            if (taskDetailId === taskId) {
+                const task = taskList.find(t => t.task_id === taskId);
+                if (task) renderTaskDetail(task);
+            }
+        }
+
+        // ── 自动刷新 ────────────────────────────────────
+        function startTaskAutoRefresh() {
+            stopTaskAutoRefresh();
+            taskRefreshTimer = setInterval(() => {
+                if (document.getElementById('taskOverlay')) {
+                    fetchTasks();
+                } else {
+                    stopTaskAutoRefresh();
+                }
+            }, 10000);  // 每10秒刷新
+        }
+
+        function stopTaskAutoRefresh() {
+            if (taskRefreshTimer) {
+                clearInterval(taskRefreshTimer);
+                taskRefreshTimer = null;
+            }
+        }
 
         // =============================================================
         //  认证模块
@@ -1501,6 +2488,7 @@
                 window.location.reload();
             });
             await fetchUserSessions();
+            connectDocStatusEvents();
             if (currentSessions.length === 0) {
                 resetToNewSession();
             } else if (!activeSessionId) {

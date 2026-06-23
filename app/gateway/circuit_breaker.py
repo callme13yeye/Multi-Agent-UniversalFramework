@@ -43,6 +43,7 @@ class CircuitBreaker:
         self.state: CircuitState = CircuitState.CLOSED
         self._state_changed_at: float = time.time()
         self._half_open_count: int = 0
+        self._failure_count: int = 0      # CLOSED 状态下连续失败计数
         self._lock = asyncio.Lock()
 
     # ── 查询方法（无锁） ──────────────────────────────────────
@@ -87,17 +88,29 @@ class CircuitBreaker:
     # ── 结果回调 ──────────────────────────────────────────────
 
     async def on_success(self) -> None:
-        """模型调用成功后调用。HALF_OPEN → CLOSED。"""
+        """模型调用成功后调用。重置失败计数；HALF_OPEN → CLOSED。"""
         async with self._lock:
-            if self.state == CircuitState.HALF_OPEN:
+            if self.state == CircuitState.CLOSED:
+                self._failure_count = 0
+            elif self.state == CircuitState.HALF_OPEN:
                 self.state = CircuitState.CLOSED
                 self._state_changed_at = time.time()
+                self._failure_count = 0
                 logger.info("熔断器恢复: HALF_OPEN → CLOSED")
 
     async def on_failure(self) -> None:
-        """模型调用失败后调用。HALF_OPEN → OPEN。"""
+        """模型调用失败后调用。CLOSED 计数，HALF_OPEN → OPEN。"""
         async with self._lock:
-            if self.state == CircuitState.HALF_OPEN:
+            if self.state == CircuitState.CLOSED:
+                self._failure_count += 1
+                if self._failure_count >= self.failure_threshold:
+                    self.state = CircuitState.OPEN
+                    self._state_changed_at = time.time()
+                    logger.warning(
+                        "熔断器触发: CLOSED → OPEN（连续失败 %d/%d）",
+                        self._failure_count, self.failure_threshold,
+                    )
+            elif self.state == CircuitState.HALF_OPEN:
                 self.state = CircuitState.OPEN
                 self._state_changed_at = time.time()
                 logger.warning("熔断器探测失败: HALF_OPEN → OPEN")
@@ -117,4 +130,5 @@ class CircuitBreaker:
             self.state = CircuitState.CLOSED
             self._state_changed_at = time.time()
             self._half_open_count = 0
+            self._failure_count = 0
             logger.info("熔断器手动重置: → CLOSED")

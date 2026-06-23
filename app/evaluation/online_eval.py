@@ -47,7 +47,8 @@ logger = logging.getLogger("online_eval")
 MAX_CONCURRENT_EVALUATIONS = 5
 
 # ---------- 工具定义 ----------
-from app.async_tools import async_get_current_time, async_web_search, async_knowledge_query_ask
+from app.tools.common import async_get_current_time, async_web_search
+from app.tools.knowledge import async_knowledge_query_ask
 
 AVAILABLE_TOOLS = [async_get_current_time, async_web_search, async_knowledge_query_ask]
 

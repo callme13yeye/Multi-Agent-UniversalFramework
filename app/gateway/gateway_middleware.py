@@ -81,22 +81,29 @@ class GatewayMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respons
         """健康感知模型路由。
 
         从 Gateway 获取模型链，逐个尝试直到成功或全部失败。
+        通过 current_handler contextvar 向 StatusCallbackHandler 推送降级/恢复事件。
         """
+        # 延迟导入避免循环依赖
+        from app.status_handler import current_handler
+
+        status_handler = current_handler.get()
         model_chain = self.gateway.get_model_chain(self.role)
 
         if not model_chain:
-            # 没有可用模型，直接调用 handler（使用 request 中的原始模型）
             logger.warning("[GatewayMiddleware] 无可用模型链，使用原始模型")
             return await handler(request)
 
         last_error: Exception | None = None
 
-        for model_name, model_instance in model_chain:
+        for i, (model_name, model_instance) in enumerate(model_chain):
             try:
                 start = time.monotonic()
                 result = await handler(request.override(model=model_instance))
                 latency = (time.monotonic() - start) * 1000
                 await self.gateway.record_success(model_name, latency)
+                # 主模型恢复（仅当之前降级过才实际推送）
+                if i == 0 and status_handler is not None:
+                    await status_handler.emit_restored()
                 return result
             except Exception as e:
                 await self.gateway.record_failure(model_name, str(e))
@@ -106,9 +113,11 @@ class GatewayMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respons
                     model_name,
                     e,
                 )
+                # 降级到备用模型（仅首次降级才推送）
+                if status_handler is not None:
+                    await status_handler.emit_degraded()
 
         # 所有模型都失败
         if last_error is not None:
             raise last_error
-        # 理论上不可达（model_chain 为空已在上面处理）
         return await handler(request)

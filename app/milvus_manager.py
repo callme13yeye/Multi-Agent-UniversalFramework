@@ -43,11 +43,12 @@ class MilvusDatabaseManager:
     async def close(self):
         """关闭所有连接"""
         async with self._pool_lock:
-            for client in self._user_pool.values():
-                try:
-                    await client.close()
-                except Exception:
-                    pass
+            # 并行关闭所有用户客户端，加速退出
+            close_tasks = [
+                client.close() for client in self._user_pool.values()
+            ]
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
             self._user_pool.clear()
         if self.admin_client:
             await self.admin_client.close()

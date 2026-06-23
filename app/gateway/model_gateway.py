@@ -58,6 +58,7 @@ class ModelGateway:
 
         # ── 并发控制 ──
         self._lock = asyncio.Lock()
+        self._health_locks: dict[str, asyncio.Lock] = {}  # per-model 锁，保护 HealthRecord 并发写入
 
         # ── 后台探活 ──
         self._probe_task: Optional[asyncio.Task[None]] = None
@@ -180,41 +181,56 @@ class ModelGateway:
     # ═══════════════════════════════════════════════════════════
 
     async def record_success(self, name: str, latency_ms: float) -> None:
-        """记录一次成功的模型调用。"""
+        """记录一次成功的模型调用。
+
+        使用 per-model 锁保护 HealthRecord 的写入，防止
+        GatewayMiddleware（请求路径）和 HealthProbe（后台探活）并发
+        修改同一模型的健康数据时产生竞态。
+        """
         hr = self._health.get(name)
         if hr is None:
             return
-        hr.total_requests += 1
-        hr.consecutive_errors = 0
-        hr.last_success_ts = time.time()
-        hr.add_latency(latency_ms)
 
+        # ── 获取或创建 per-model 锁 ──
+        if name not in self._health_locks:
+            self._health_locks[name] = asyncio.Lock()
+        lock = self._health_locks[name]
+
+        async with lock:
+            hr.total_requests += 1
+            hr.consecutive_errors = 0
+            hr.last_success_ts = time.time()
+            hr.add_latency(latency_ms)
+
+        # 熔断器回调在锁外执行（CircuitBreaker 有自己的内部锁）
         cb = self._breakers.get(name)
         if cb is not None:
             await cb.on_success()
 
     async def record_failure(self, name: str, error_message: str) -> None:
-        """记录一次失败的模型调用，可能触发自动熔断。"""
+        """记录一次失败的模型调用，可能触发自动熔断。
+
+        使用 per-model 锁保护 HealthRecord 的写入。
+        """
         hr = self._health.get(name)
         if hr is None:
             return
-        hr.total_requests += 1
-        hr.total_errors += 1
-        hr.consecutive_errors += 1
-        hr.last_error_ts = time.time()
-        hr.last_error_message = error_message
 
+        if name not in self._health_locks:
+            self._health_locks[name] = asyncio.Lock()
+        lock = self._health_locks[name]
+
+        async with lock:
+            hr.total_requests += 1
+            hr.total_errors += 1
+            hr.consecutive_errors += 1
+            hr.last_error_ts = time.time()
+            hr.last_error_message = error_message
+
+        # 熔断器回调在锁外执行（CircuitBreaker 有自己的内部锁）
         cb = self._breakers.get(name)
         if cb is not None:
-            await cb.on_failure()
-            # 自动熔断检查
-            if hr.consecutive_errors >= cb.failure_threshold and cb.state == CircuitState.CLOSED:
-                await cb.trip()
-                logger.warning(
-                    "[Gateway] 自动熔断 %s（连续 %d 次失败）",
-                    name,
-                    hr.consecutive_errors,
-                )
+            await cb.on_failure()  # CircuitBreaker 内部自增计数 + 判断是否熔断
 
     # ═══════════════════════════════════════════════════════════
     # 热切换

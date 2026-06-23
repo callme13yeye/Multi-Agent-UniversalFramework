@@ -34,7 +34,9 @@ class HealthProbe:
         """主循环，每 interval_seconds 秒执行一次。"""
         logger.info("[HealthProbe] 探活循环已启动，间隔 %.0fs", self._interval)
         while True:
-            await asyncio.sleep(self._interval)
+            # 分片 sleep（每秒检查一次取消信号），避免 shutdown 时最多等 30 秒
+            for _ in range(int(self._interval)):
+                await asyncio.sleep(1)
             await self._probe_all()
 
     async def _probe_all(self) -> None:
@@ -53,15 +55,23 @@ class HealthProbe:
         if ifaces is None:
             return
 
+        PROBE_TIMEOUT = 10.0  # 单次探活超时（秒），防止无响应 API 阻塞 shutdown
+
         for iface, model in list(ifaces.items()):
             try:
                 start = time.monotonic()
                 # 优先尝试 ainvoke（LangChain 接口）
                 if hasattr(model, "ainvoke"):
-                    await model.ainvoke([{"role": "user", "content": "ping"}])
+                    await asyncio.wait_for(
+                        model.ainvoke([{"role": "user", "content": "ping"}]),
+                        timeout=PROBE_TIMEOUT,
+                    )
                 # 备选 acomplete（LlamaIndex 接口）
                 elif hasattr(model, "acomplete"):
-                    await model.acomplete("ping")
+                    await asyncio.wait_for(
+                        model.acomplete("ping"),
+                        timeout=PROBE_TIMEOUT,
+                    )
                 else:
                     logger.debug("[HealthProbe] %s/%s: 无可探测接口，跳过", name, iface)
                     continue

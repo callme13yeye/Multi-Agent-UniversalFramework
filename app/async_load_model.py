@@ -58,6 +58,7 @@ class AsyncLoadModel:
                 model_provider="openai",
                 api_key=modelscope_api_key,
                 base_url=modelscope_base_url,
+                timeout=120,  # HTTP 读超时，防止 shutdown 时 TCP 挂死
             )
             cls._langchain_fallback_models[model] = model_instance
             return model_instance
@@ -76,6 +77,7 @@ class AsyncLoadModel:
                 api_key=modelscope_api_key,
                 api_base=modelscope_base_url,
                 is_chat_model=True,
+                timeout=120,  # HTTP 读超时，防止 shutdown 时 TCP 挂死
             )
             cls._llama_fallback_models[model] = model_instance
             return model_instance
@@ -93,6 +95,7 @@ class AsyncLoadModel:
                 model=model,
                 api_key=deepseek_api_key,
                 api_base=deepseek_base_url,
+                request_timeout=120,  # HTTP 读超时，防止 shutdown 时 TCP 挂死
                 extra_body={"thinking": {"type": "disabled"}},
             )
             cls._langchain_chat_models[model] = model_instance
@@ -112,6 +115,7 @@ class AsyncLoadModel:
                 api_key=deepseek_api_key,
                 api_base=deepseek_base_url,
                 is_chat_model=True,
+                timeout=120,  # HTTP 读超时，防止 shutdown 时 TCP 挂死
             )
             cls._llama_chat_models[model] = model_instance
             return model_instance

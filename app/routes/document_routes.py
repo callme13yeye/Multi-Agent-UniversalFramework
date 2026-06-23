@@ -161,8 +161,21 @@ async def document_events(
 ):
     """SSE 端点：文档状态变更时主动推送给前端"""
     from app.document_event_bus import document_event_bus
+    from app.pg_database import pg_db_manager
+    from datetime import datetime, timezone
 
     sub_id = document_event_bus.subscribe()
+    filename_cache: dict[int, str] = {}  # doc_id → filename
+
+    async def _get_filename(doc_id: int) -> str:
+        """从缓存或 DB 获取文件名。"""
+        if doc_id not in filename_cache:
+            doc = await pg_db_manager.get_document(doc_id)
+            if doc:
+                filename_cache[doc_id] = doc.get("original_filename", "未知文件")
+            else:
+                filename_cache[doc_id] = "未知文件"
+        return filename_cache[doc_id]
 
     async def event_generator():
         try:
@@ -170,11 +183,15 @@ async def document_events(
                 if event.get("type") == "heartbeat":
                     yield {"event": "heartbeat", "data": ""}
                 elif event.get("user_id") == current_user:
+                    doc_id = event["doc_id"]
+                    filename = await _get_filename(doc_id)
                     yield {
                         "event": "status_change",
                         "data": json.dumps({
-                            "doc_id": event["doc_id"],
+                            "doc_id": doc_id,
                             "status": event["status"],
+                            "filename": filename,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }),
                     }
         finally:

@@ -2,7 +2,7 @@
 # 基于 deepagents.create_deep_agent, 支持原生 sub-agent 编排。
 #
 # 关键设计：
-# - create_deep_agent 自动组装基础中间件栈（Filesystem/Skills/SubAgent/
+# - create_deep_agent 自动组装基础中间件栈（Filesystem/SubAgent/
 #   Summarization/Memory/HumanInTheLoop），我们只注入领域定制中间件。
 # - subagents 参数传入后，create_deep_agent 自动创建 SubAgentMiddleware
 #   并注入 task 工具，让 Router Agent 可以 spawn Specialist Agent。
@@ -10,6 +10,7 @@
 from typing import Literal, Any, Type, Optional, Sequence
 from pydantic import BaseModel
 
+from langgraph.config import get_config
 from app.async_load_model import AsyncLoadModel
 from deepagents import create_deep_agent, SubAgent, CompiledSubAgent
 from langchain.agents.middleware import (
@@ -20,8 +21,7 @@ from langchain.agents.middleware import (
     ModelRetryMiddleware,
 )
 from app.gateway import GatewayMiddleware, ModelRole
-from deepagents.middleware import SkillsMiddleware
-from deepagents.backends import StateBackend, StoreBackend, CompositeBackend, FilesystemBackend
+from deepagents.backends import StateBackend, StoreBackend, CompositeBackend
 
 
 async def async_create_agent(
@@ -36,6 +36,7 @@ async def async_create_agent(
         extra_middleware_position: Literal["prepend", "append"] = "append",
         subagents: Optional[Sequence[SubAgent | CompiledSubAgent]] = None,
         gateway: Any = None,
+        interrupt_on: dict | None = None,
 ):
     """Create a deep agent with the full middleware pipeline.
 
@@ -55,6 +56,9 @@ async def async_create_agent(
         gateway: Optional ModelGateway for intelligent model routing.
                  When provided, GatewayMiddleware replaces ModelFallbackMiddleware
                  for health-aware routing with circuit breakers and hot-swap.
+        interrupt_on: Optional dict mapping tool names to interrupt configs.
+                      When provided, HumanInTheLoopMiddleware intercepts calls
+                      to these tools and pauses execution for human approval.
     """
     langchain_api_llm = await AsyncLoadModel.async_langchain_api_model(model_name)
 
@@ -69,40 +73,26 @@ async def async_create_agent(
         routes={
             "/memories/": StoreBackend(
                 store=store,
-                namespace=lambda ctx: ("memories", ctx.context.user_id),
-            ),
-            "/skills/built-in/": FilesystemBackend(
-                root_dir="app/skills",
-                virtual_mode=True,
-            ),
-            "/skills/": StoreBackend(
-                store=store,
-                namespace=lambda ctx: ("skills", ctx.context.user_id),
+                namespace=lambda rt: (
+                    "memories",
+                    str(get_config()["configurable"].get("user_id", "anonymous")),
+                ),
             ),
         },
     )
 
     # ── 领域定制中间件（注入到 create_deep_agent 的 user 层） ──
     # create_deep_agent 自动处理的基础栈：
-    #   [TodoList → Skills(如果传了skills参数) → Filesystem
-    #    → SubAgent(如果传了subagents) → Summarization
-    #    → PatchToolCalls]
+    #   [TodoList → Filesystem → SubAgent(如果传了subagents)
+    #    → Summarization → PatchToolCalls]
     # 我们在之后注入以下定制中间件，然后 create_deep_agent 再追加
     # Memory/HumanInTheLoop 等尾部中间件。
     #
-    # 我们不传 skills 参数给 create_deep_agent（避免它在基础栈中
-    # 创建），而是手动放入 user_middleware 以保持正确顺序。
-    #
     # 意图路由采用 LLM 自路由模式（参考 Claude Code / HermesAgent / OpenClaw）：
-    # 所有工具描述和 SubAgent 列表在 system prompt 中始终可见，
-    # LLM 通过 Function Calling 自行选择。
+    # SubAgent 的 name + description 通过 task 工具自动注入 system prompt，
+    # LLM 通过 Function Calling 自行选择合适的 Specialist Agent。
 
     user_middleware: list = [
-        # 技能元数据注入 system prompt
-        SkillsMiddleware(
-            backend=backend,
-            sources=["/skills/built-in/", "/skills/"],
-        ),
         # 模型调用限制 — run_limit 对应单个请求，thread_limit 对应整个会话
         ModelCallLimitMiddleware(
             thread_limit=100,
@@ -154,5 +144,6 @@ async def async_create_agent(
         checkpointer=checkpointer,
         store=store,
         memory=["/memories/AGENTS.md"],
+        interrupt_on=interrupt_on,
     )
     return agent

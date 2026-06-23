@@ -44,4 +44,47 @@ def get_config():
         "health_probe": {
             "interval_seconds": 30.0,     # 探活间隔
         },
+
+        # ── 超时配置（子智能体执行 & 工具调用） ────────────
+        "timeouts": {
+            "step_execution_seconds": 300.0,   # 单步骤整体超时（5分钟）
+            "tool_call_seconds": 60.0,         # 单个工具调用超时（1分钟）
+            "approval_wait_hours": 72.0,       # 审批最长等待时间（72小时后告警）
+        },
+
+        # ── 清理配置 ────────────────────────────────────
+        "cleanup": {
+            "child_thread_ttl_seconds": 3600.0,  # 子Thread checkpointer TTL（1小时）
+        },
+
+        # ── 速率限制 ────────────────────────────────────
+        "rate_limits": {
+            "user_per_minute": 60,            # 每用户每分钟最大请求数
+            "ip_per_minute": 300,             # 每IP每分钟最大请求数
+            "window_seconds": 60,             # 滑动窗口大小
+        },
+
+        # ── 熔断配置（子智能体级别） ────────────────────
+        "specialist_circuit_breaker": {
+            "failure_threshold": 3,            # 同一Specialist连续失败N次后熔断
+            "cooldown_seconds": 60.0,          # 熔断冷却时间
+        },
+
+        # ── 优雅关闭配置 ────────────────────────────────
+        "graceful_shutdown": {
+            "drain_timeout_seconds": 30.0,     # 等待运行中任务完成的超时
+            "global_timeout_seconds": 15.0,    # 全局关闭超时
+        },
+
+        # ── 自进化系统配置 ────────────────────────────────
+        "evolution": {
+            "enabled": True,                    # 是否启用自进化系统
+            "scan_interval_hours": 6.0,         # 自动扫描间隔（小时）
+            "analysis_lookback_hours": 24,      # 每次分析回溯多久的任务
+            "max_gaps_per_scan": 5,             # 每次扫描最多生成多少缺口报告
+            "min_tasks_for_analysis": 10,       # 最少需要多少已完成任务才触发分析
+            "auto_approve_threshold": 0.0,      # 自动化审批阈值（0.0=永远人工审批, 1.0=完全自动）
+            "validation_min_pass_rate": 0.7,    # 验证通过率下限
+            "llm_model": "deepseek-v4-flash",   # 进化系统使用的 LLM
+        },
     }

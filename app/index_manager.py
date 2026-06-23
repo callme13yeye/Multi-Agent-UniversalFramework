@@ -170,17 +170,8 @@ class IndexManager:
             await self._delete_milvus_nodes(user_id, old_hash)
             await self.pg.delete_document_record(existing_by_filename["id"])
 
-        # ── 上传 MinIO ──
+        # ── 创建文档记录（先创建，用于后续状态跟踪）──
         object_name = f"{user_id}/{original_filename}"
-        await minio_client.put_object(
-            BUCKET_NAME,
-            object_name,
-            io.BytesIO(file_data),
-            length=file_size,
-            content_type="application/octet-stream",
-        )
-
-        # ── 创建文档记录 ──
         doc_id = await self.pg.create_document(
             user_id=user_id,
             file_hash=file_hash,
@@ -191,13 +182,26 @@ class IndexManager:
             parser_strategy=parser_strategy,
         )
 
+        # ── 上传 MinIO ──
+        await self.pg.update_document_status(doc_id, status="storing")
+        await minio_client.put_object(
+            BUCKET_NAME,
+            object_name,
+            io.BytesIO(file_data),
+            length=file_size,
+            content_type="application/octet-stream",
+        )
+
+        # ── 排队等待后台处理 ──
+        await self.pg.update_document_status(doc_id, status="queuing")
+
         logger.info(
             "新文件上传: %s (哈希=%s, 策略=%s, doc_id=%s)",
             original_filename, file_hash[:16], parser_strategy, doc_id,
         )
 
         return {
-            "status": "processing",
+            "status": "queuing",
             "doc_id": doc_id,
             "file_hash": file_hash,
             "object_path": object_name,
@@ -219,7 +223,7 @@ class IndexManager:
         """
         tmp_path = None
         try:
-            await self.pg.update_document_status(doc_id, status="processing")
+            await self.pg.update_document_status(doc_id, status="downloading")
 
             object_name = f"{user_id}/{original_filename}"
             suffix = Path(original_filename).suffix
@@ -230,6 +234,12 @@ class IndexManager:
             doc = await self.pg.get_document(doc_id)
             file_hash = doc["file_hash"] if doc else None
 
+            await self.pg.update_document_status(doc_id, status="loading")
+
+            # 状态回调：清洗/切分阶段由 process_document 内部触发
+            async def _doc_status_callback(status: str):
+                await self.pg.update_document_status(doc_id, status=status)
+
             nodes = await process_document(
                 file_path=tmp_path,
                 embed_model=embed_model,
@@ -237,6 +247,7 @@ class IndexManager:
                 parser_strategy=parser_strategy,
                 original_filename=original_filename,
                 file_hash=file_hash,
+                status_callback=_doc_status_callback,
             )
             if not nodes:
                 await self.pg.update_document_status(
@@ -245,6 +256,7 @@ class IndexManager:
                 logger.warning("文件 %s 无可提取内容", original_filename)
                 return
 
+            await self.pg.update_document_status(doc_id, status="indexing")
             index = await async_get_milvus_index(user_id=user_id, embed_model=embed_model)
             await index.ainsert_nodes(nodes)
 
