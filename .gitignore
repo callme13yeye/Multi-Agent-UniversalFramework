@@ -20,17 +20,17 @@ key.env
 .DS_Store
 Thumbs.db
 
+# Project docs
+CLAUDE.md
+
 # Models
 models/
 
 # Claude
-.claude/sessions/
-.claude/projects/*/memory/*.md
-.claude/projects/*/538cdaaf-*.jsonl
+.claude/
 
 # Logs
 *.log
 
 # UV
-uv.lock
 .pytest_cache/
