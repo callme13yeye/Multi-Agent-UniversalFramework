@@ -282,7 +282,6 @@ async def lifespan(app: FastAPI):
     # ── 创建 Executor DeepAgent（第二层：后台任务执行） ────
     # 与 Triage 同类型，换 system prompt 和工具配置。
     # 关键差异：
-    #   - 没有 create_background_task（防止递归创建任务）
     #   - 有 request_approval（触发 HITL interrupt）
     #   - interrupt_on 配置让 HumanInTheLoopMiddleware 在调用
     #     request_approval 时自动挂起任务
