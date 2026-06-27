@@ -138,15 +138,18 @@ class RetrievalPipeline:
         fallback_llm: Optional[Any] = None,
         enable_rewriter: bool = True,
         enable_fusion: bool = True,
+        enable_graph_rag: bool = True,
         top_k: int = 10,
         drop_ratio: float = 0.3,
         min_score: float = 0.70,
         gateway: Any = None,
+        knowledge_graph_service: Any = None,
     ):
         self.embed_model = embed_model
         self.rerank_model = rerank_model
         self.fallback_llm = fallback_llm
         self.gateway = gateway
+        self.kg_service = knowledge_graph_service
 
         # 子组件：查询重写用 fallback 模型（或 gateway 动态获取）
         self.query_rewriter = QueryRewriter(
@@ -157,6 +160,7 @@ class RetrievalPipeline:
 
         # 配置
         self.enable_fusion = enable_fusion
+        self.enable_graph_rag = enable_graph_rag
         self.top_k = top_k
         self.drop_ratio = drop_ratio
         self.min_score = min_score
@@ -249,7 +253,80 @@ class RetrievalPipeline:
 
         return nodes
 
-    # ── 内部方法 ──────────────────────────────────────────────
+    # ── 图谱增强接口 ──────────────────────────────────────────
+
+    @observe(name="RetrievalPipeline.retrieve_with_graph")
+    async def retrieve_with_graph(
+        self,
+        question: str,
+        user_id: Optional[int] = None,
+        session_id: Optional[str] = None,
+    ) -> dict:
+        """检索 + 图谱增强 — 同时返回向量检索结果和图谱上下文。
+
+        比单独调用 retrieve() 多了 graph_context 字段，
+        用于 LLM 生成时同时参考文档片段和知识图谱关联。
+
+        Returns:
+            {
+                "nodes": list[NodeWithScore],       # 向量检索结果
+                "graph_context": GraphContext,      # 图谱上下文（可能为空）
+                "sources": list[dict],              # 合并后的来源列表
+            }
+        """
+        # 标准向量检索
+        nodes = await self.retrieve(
+            question=question,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        # 图谱增强（并行执行，不阻塞主检索）
+        graph_context = None
+        if self.enable_graph_rag and self.kg_service is not None and self.kg_service.available:
+            try:
+                # 从检索结果中提取关键词
+                keywords = self._extract_keywords_from_nodes(nodes, question)
+                graph_context = await self.kg_service.graph_rag(
+                    keywords=keywords,
+                    question=question,
+                    max_entities=15,
+                    max_relations=30,
+                    max_hops=2,
+                )
+            except Exception as e:
+                logger.warning("[RetrievalPipeline] 图谱增强失败: %s", e)
+                graph_context = None
+
+        return {
+            "nodes": nodes,
+            "graph_context": graph_context if graph_context and not graph_context.is_empty() else None,
+        }
+
+    def _extract_keywords_from_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        question: str,
+    ) -> list[str]:
+        """从检索结果的节点内容和问题中提取图谱搜索关键词。
+
+        简单启发式：取高分数节点的文件名和问题中的短语。
+        """
+        keywords = []
+
+        # 从高分节点提取关键词（文件名通常包含实体信息）
+        for n in nodes[:5]:
+            file_name = n.node.metadata.get("file_name", "")
+            if file_name:
+                # 去掉扩展名，作为关键词
+                name = file_name.rsplit(".", 1)[0]
+                if len(name) >= 2:
+                    keywords.append(name)
+
+        # 问题本身也作为关键词
+        keywords.append(question[:100])
+
+        return keywords[:5]
 
     async def _multirecall_fusion(
         self, retriever, queries: list[str], rrf_k: int = 60

@@ -263,4 +263,5 @@ dependencies = [
     "llama-index-llms-deepseek==0.3.0",
     "deepeval>=3.9.6",
     "miniopy-async>=1.21.1",
+    "neo4j>=5.28.0",
 ]

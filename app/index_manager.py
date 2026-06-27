@@ -67,13 +67,22 @@ class IndexManager:
             raise
 
     async def delete_document(self, user_id: int, doc_id: int) -> bool:
-        """删除文档记录及对应的 Milvus 节点"""
+        """删除文档记录及对应的 Milvus 节点和图谱实体"""
         doc = await self.pg.get_document(doc_id)
         if not doc or doc["user_id"] != user_id:
             return False
 
         if doc["file_hash"]:
             await self._delete_milvus_nodes(user_id, doc["file_hash"])
+
+        # 清理知识图谱中该文档关联的实体和关系
+        try:
+            from app.knowledge_graph import knowledge_graph_service
+            if knowledge_graph_service.available:
+                await knowledge_graph_service.remove_document_entities(str(doc_id))
+        except Exception as e:
+            logger.warning("文档 %s 图谱清理失败（非致命）: %s", doc_id, e)
+
         await self.pg.delete_document_record(doc_id)
 
         logger.info("已删除文档 %s (%s)", doc_id, doc["original_filename"])
@@ -264,6 +273,25 @@ class IndexManager:
                 doc_id, status="indexed", chunk_count=len(nodes),
             )
             logger.info("文件 %s 索引完成：%s 个节点", original_filename, len(nodes))
+
+            # ── 知识图谱抽取（后台，非阻塞，失败不影响索引） ──
+            try:
+                from app.knowledge_graph import knowledge_graph_service
+                if knowledge_graph_service.available:
+                    await self.pg.update_document_status(doc_id, status="graph_extracting")
+                    # 拼接所有节点文本用于实体抽取
+                    full_text = "\n\n".join(n.get_content() for n in nodes)
+                    entity_count = await knowledge_graph_service.process_document(
+                        text=full_text,
+                        doc_id=str(doc_id),
+                    )
+                    logger.info(
+                        "文件 %s 知识图谱抽取完成：%d 个实体", original_filename, entity_count,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "文件 %s 知识图谱抽取失败（非致命）: %s", original_filename, e,
+                )
         except Exception as e:
             logger.exception("索引文件 %s 失败: %s", original_filename, e)
             await self.pg.update_document_status(

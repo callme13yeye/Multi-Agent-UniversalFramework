@@ -27,6 +27,8 @@ from app.async_load_model import AsyncLoadModel
 from app.pg_database import pg_db_manager
 from app.milvus_manager import milvus_db_manager
 from app.redis_manager import redis_manager
+from app.neo4j_manager import neo4j_manager
+from app.knowledge_graph import knowledge_graph_service
 from app.auth import get_current_user, get_current_user_sse
 from app.pydantic_models import ChatRequest, ChatContext, FeedbackRequest, FeedbackResponse, SourcesResponse
 from app.routes import auth_routes, session_routes, upload_routes, document_routes
@@ -81,6 +83,10 @@ if "async_web_search" in _TOOL_REGISTRY:
     tools.append(_TOOL_REGISTRY["async_web_search"])
 if "async_knowledge_query_ask" in _TOOL_REGISTRY:
     tools.append(_TOOL_REGISTRY["async_knowledge_query_ask"])
+if "async_graph_query" in _TOOL_REGISTRY:
+    tools.append(_TOOL_REGISTRY["async_graph_query"])
+if "async_graph_search" in _TOOL_REGISTRY:
+    tools.append(_TOOL_REGISTRY["async_graph_search"])
 
 
 async def initialize_model():
@@ -158,6 +164,21 @@ async def lifespan(app: FastAPI):
     # Redis 缓存连接（非致命—缓存不可用不影响核心功能）
     await redis_manager.initialize()
 
+    # ── Neo4j 知识图谱（非致命—图谱不可用不影响核心 RAG） ──
+    kg_config = config.get("knowledge_graph", {})
+    if kg_config.get("enabled", True):
+        try:
+            await neo4j_manager.initialize()
+            # 注入 gateway 引用（此时 gateway 尚未初始化，后续通过方法设置）
+            app.state.neo4j_manager = neo4j_manager
+            logger.info("[main] Neo4j 知识图谱连接成功")
+        except Exception as e:
+            logger.warning("[main] Neo4j 初始化失败（非致命，知识图谱功能降级）: %s", e)
+            app.state.neo4j_manager = None
+    else:
+        app.state.neo4j_manager = None
+        logger.info("[main] 知识图谱已禁用 (knowledge_graph.enabled=false)")
+
     # ── 审批/人审已统一至 Supervisor 后台任务 ────────────────
     # async_request_approval 工具通过 Store 存储审批请求，
     # Supervisor 在 execute_node 中检测 [HUMAN_APPROVAL_REQUIRED]
@@ -232,23 +253,35 @@ async def lifespan(app: FastAPI):
             "llama_fallback_chat_llm": None,      # 由 gateway 管理
         }
 
-        # 初始化统一检索管道（传入 gateway）
+        # 初始化知识图谱服务（注入 gateway）
+        kg_enabled = kg_config.get("enabled", True) and neo4j_manager.available
+        if kg_enabled:
+            knowledge_graph_service._gateway = gateway
+            app.state.kg_service = knowledge_graph_service
+            logger.info("[main] KnowledgeGraphService 已初始化")
+        else:
+            app.state.kg_service = None
+
+        # 初始化统一检索管道（传入 gateway 和 kg_service）
         pipeline = RetrievalPipeline(
             embed_model=embed_model,
             rerank_model=rerank_model,
             fallback_llm=None,  # gateway 动态提供 rewriter LLM
             enable_rewriter=True,
             enable_fusion=True,
+            enable_graph_rag=kg_config.get("graph_rag_enabled", True) and kg_enabled,
             top_k=10,
             gateway=gateway,
+            knowledge_graph_service=knowledge_graph_service if kg_enabled else None,
         )
-        # 注册资源到工具模块（传入 gateway）
+        # 注册资源到工具模块（传入 gateway 和 kg_service）
         register_knowledge_resource(
             embed_model=embed_model,
             rerank_model=rerank_model,
             llama_chat_model=None,  # gateway 动态提供
             retrieval_pipeline=pipeline,
             gateway=gateway,
+            knowledge_graph_service=knowledge_graph_service if kg_enabled else None,
         )
     except Exception as e:
         logger.critical(f"知识库资源初始化失败: {e}", exc_info=True)
@@ -469,6 +502,7 @@ async def lifespan(app: FastAPI):
                 pg_db_manager.close(),
                 milvus_db_manager.close(),
                 redis_manager.close(),
+                neo4j_manager.close(),
             )
             print("资源已清理")
     except asyncio.TimeoutError:

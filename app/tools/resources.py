@@ -25,6 +25,7 @@ def register_knowledge_resource(
     embed_model, rerank_model, llama_chat_model,
     retrieval_pipeline=None,
     gateway=None,
+    knowledge_graph_service=None,
 ):
     """注册知识库检索所需的模型和管道（由 main.py lifespan 调用）。"""
     knowledge_resources["embed_model"] = embed_model
@@ -33,6 +34,8 @@ def register_knowledge_resource(
     knowledge_resources["retrieval_pipeline"] = retrieval_pipeline
     if gateway is not None:
         knowledge_resources["gateway"] = gateway
+    if knowledge_graph_service is not None:
+        knowledge_resources["knowledge_graph_service"] = knowledge_graph_service
 
 
 def _get_llm_for_retrieval():

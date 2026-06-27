@@ -64,6 +64,18 @@ def get_config():
             "window_seconds": 60,             # 滑动窗口大小
         },
 
+        # ── 知识图谱配置 ────────────────────────────────
+        "knowledge_graph": {
+            "enabled": True,                    # 是否启用知识图谱
+            "graph_rag_enabled": True,          # 是否在检索管道中启用 GraphRAG
+            "max_chunks_per_doc": 10,           # 每个文档最多处理的文本块数
+            "chunk_size": 2000,                 # 实体抽取的文本块大小（字符数）
+            "max_entities_per_chunk": 15,       # 每块文本最多抽取的实体数
+            "max_graph_hops": 2,                # GraphRAG 最大跳数
+            "max_graph_entities": 15,           # GraphRAG 最大返回实体数
+            "max_graph_relations": 30,          # GraphRAG 最大返回关系数
+        },
+
         # ── 熔断配置（子智能体级别） ────────────────────
         "specialist_circuit_breaker": {
             "failure_threshold": 3,            # 同一Specialist连续失败N次后熔断
