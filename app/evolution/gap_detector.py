@@ -135,10 +135,9 @@ class GapDetector:
         if not journal_entries:
             return None
 
-        # 快速过滤：只分析有 error / 有至少一次 general_assistant 委托的任务
+        # 快速过滤：只分析有 error 的任务
         has_signal = any(
-            e.event in ("error",) or
-            ("general_assistant" in str(e.detail.get("specialist", "")))
+            e.event in ("error",)
             for e in journal_entries
         )
         if not has_signal:

@@ -27,6 +27,7 @@ async def register_user(username: str, password: str) -> int:
     """
     password_hash = hash_password(password)
     milvus_password = create_encrypt_credential(password)
+    user_id = None
     try:
         user_id = await pg_db_manager.create_user(username, password_hash, milvus_password)
         milvus_user_id = await milvus_db_manager.provision_user(username, password)
@@ -42,12 +43,19 @@ async def register_user(username: str, password: str) -> int:
     except HTTPException:
         raise
     except ValueError as e:
+        error_msg = str(e)
+        # 用户名重复 → 409；其他 ValueError → 500
+        if "已存在" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=error_msg,
+            )
         logger.exception("注册过程发生未知错误")
         if user_id:
             await pg_db_manager.delete_user(user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=error_msg,
         )
 
 

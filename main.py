@@ -67,12 +67,20 @@ fallback_model_name = config.get("fallback_model_name")
 
 tools: list = []
 
-# ── 将后台任务工具注入主 Agent（其他工具由 Specialist SubAgent 持有）────
+# ── 构建 Triage Agent 工具集 ──────────────────────────────────
+# Triage 直接持有通用工具，简单问题（时间/搜索/知识库）无需委托 Specialist
+# 复杂招聘任务仍通过 task 工具委托给 Specialist，或通过 create_background_task 转为后台
 from app.tools import TOOL_REGISTRY as _TOOL_REGISTRY
 if "create_background_task" in _TOOL_REGISTRY:
     tools.append(_TOOL_REGISTRY["create_background_task"])
 if "get_task_status" in _TOOL_REGISTRY:
     tools.append(_TOOL_REGISTRY["get_task_status"])
+if "async_get_current_time" in _TOOL_REGISTRY:
+    tools.append(_TOOL_REGISTRY["async_get_current_time"])
+if "async_web_search" in _TOOL_REGISTRY:
+    tools.append(_TOOL_REGISTRY["async_web_search"])
+if "async_knowledge_query_ask" in _TOOL_REGISTRY:
+    tools.append(_TOOL_REGISTRY["async_knowledge_query_ask"])
 
 
 async def initialize_model():
