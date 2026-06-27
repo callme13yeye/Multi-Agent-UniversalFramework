@@ -359,7 +359,7 @@ async def lifespan(app: FastAPI):
                          approval_id, list(approval_data.keys()) if approval_data else [])
             return False
         try:
-            await store.aput(("approval_requests",), approval_id, approval_data)
+            await app.state.store.aput(("approval_requests",), approval_id, approval_data)
             logger.info("[DeadLetter] 审批 Store 写入重试成功: %s", approval_id)
             return True
         except Exception as e:
