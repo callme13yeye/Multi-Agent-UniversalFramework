@@ -29,6 +29,7 @@ from app.milvus_manager import milvus_db_manager
 from app.redis_manager import redis_manager
 from app.neo4j_manager import neo4j_manager
 from app.knowledge_graph import knowledge_graph_service
+from app.index_manager import index_manager
 from app.auth import get_current_user, get_current_user_sse
 from app.pydantic_models import ChatRequest, ChatContext, FeedbackRequest, FeedbackResponse, SourcesResponse
 from app.routes import auth_routes, session_routes, upload_routes, document_routes
@@ -285,6 +286,31 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.critical(f"知识库资源初始化失败: {e}", exc_info=True)
+
+    # ── MinerU PDF 智能解析引擎 ──────────────────────────
+    mineru_config = config.get("mineru", {})
+    app.state.mineru_available = False
+    if mineru_config.get("enabled", False):
+        try:
+            from app.readers.mineru_reader import MinerUReader
+
+            mineru_reader = MinerUReader(
+                backend=mineru_config.get("backend", "pipeline"),
+                parse_method=mineru_config.get("parse_method", "auto"),
+                lang=mineru_config.get("lang", "ch"),
+                formula_enable=mineru_config.get("formula_enable", True),
+                table_enable=mineru_config.get("table_enable", True),
+                timeout_seconds=mineru_config.get("timeout_seconds", 300.0),
+            )
+            if mineru_reader.is_available():
+                app.state.mineru_reader = mineru_reader
+                app.state.mineru_available = True
+                index_manager.mineru_reader = mineru_reader
+                logger.info("[main] MinerU PDF 解析引擎已启用 (pipeline, cpu)")
+            else:
+                logger.warning("[main] MinerU 模型未就绪，降级 PyMuPDF")
+        except Exception as e:
+            logger.warning("[main] MinerU 初始化失败，降级 PyMuPDF: %s", e)
 
     # 发现 Specialist Sub-Agents（用于多 Agent 编排）
     try:

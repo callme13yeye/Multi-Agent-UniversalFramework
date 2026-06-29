@@ -76,6 +76,19 @@ def get_config():
             "max_graph_relations": 30,          # GraphRAG 最大返回关系数
         },
 
+        # ── MinerU PDF 智能解析配置 ──────────────────────
+        "mineru": {
+            "enabled": True,                       # 是否启用 MinerU（关闭则降级 PyMuPDF）
+            "models_dir": "D:/agentrag/models/mineru-pipeline",
+            "device_mode": "cpu",                  # cpu | cuda | mps
+            "backend": "pipeline",                 # 解析后端：pipeline（CPU/GPU通用）
+            "parse_method": "auto",                # auto | txt | ocr
+            "lang": "ch",                          # OCR 语言
+            "formula_enable": True,                # 是否启用公式识别
+            "table_enable": True,                  # 是否启用表格识别
+            "timeout_seconds": 300.0,              # 单次解析超时（秒）
+        },
+
         # ── 熔断配置（子智能体级别） ────────────────────
         "specialist_circuit_breaker": {
             "failure_threshold": 3,            # 同一Specialist连续失败N次后熔断

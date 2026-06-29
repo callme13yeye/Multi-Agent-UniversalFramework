@@ -96,6 +96,7 @@ async def upload_file(
         )
 
     # 后台索引
+    gateway = getattr(request.app.state, "model_gateway", None)
     background_tasks.add_task(
         index_manager.process_and_index,
         user_id=current_user,
@@ -105,6 +106,7 @@ async def upload_file(
         embed_model=embed_model,
         llm=llm,
         parser_strategy=parser_strategy,
+        gateway=gateway,
     )
 
     return UploadResponse(

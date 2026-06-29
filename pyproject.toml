@@ -264,4 +264,7 @@ dependencies = [
     "deepeval>=3.9.6",
     "miniopy-async>=1.21.1",
     "neo4j>=5.28.0",
+    "mineru[pipeline,s3]>=3.4.0",
 ]
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"

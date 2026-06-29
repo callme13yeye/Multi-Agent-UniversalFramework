@@ -30,6 +30,7 @@ class IndexManager:
 
     def __init__(self, pg_manager: Optional[DatabaseManager] = None):
         self.pg = pg_manager or pg_db_manager
+        self.mineru_reader = None  # 由 lifespan 注入 MinerUReader 实例
 
     # ───────── Milvus 节点删除 ─────────
 
@@ -226,6 +227,7 @@ class IndexManager:
         embed_model,
         llm,
         parser_strategy: Optional[str] = None,
+        gateway=None,
     ):
         """
         后台阶段：从 MinIO 下载 → 处理管道 → 写入 Milvus → 更新状态
@@ -257,6 +259,8 @@ class IndexManager:
                 original_filename=original_filename,
                 file_hash=file_hash,
                 status_callback=_doc_status_callback,
+                mineru_reader=self.mineru_reader,
+                gateway=gateway,
             )
             if not nodes:
                 await self.pg.update_document_status(
@@ -266,32 +270,46 @@ class IndexManager:
                 return
 
             await self.pg.update_document_status(doc_id, status="indexing")
-            index = await async_get_milvus_index(user_id=user_id, embed_model=embed_model)
-            await index.ainsert_nodes(nodes)
 
-            await self.pg.update_document_status(
-                doc_id, status="indexed", chunk_count=len(nodes),
-            )
-            logger.info("文件 %s 索引完成：%s 个节点", original_filename, len(nodes))
+            import asyncio as _asyncio
 
-            # ── 知识图谱抽取（后台，非阻塞，失败不影响索引） ──
-            try:
+            # ── Milvus 向量索引 & 知识图谱抽取并行执行 ─────────
+            # 两者使用不同资源（Milvus=本地CPU embedding, KG=远程LLM API），
+            # 无依赖关系，并行可节省约 40s+ 的索引时间。
+            async def _do_milvus():
+                index = await async_get_milvus_index(user_id=user_id, embed_model=embed_model)
+                await index.ainsert_nodes(nodes)
+                logger.info("文件 %s 索引完成：%s 个节点", original_filename, len(nodes))
+
+            async def _do_kg():
                 from app.knowledge_graph import knowledge_graph_service
-                if knowledge_graph_service.available:
-                    await self.pg.update_document_status(doc_id, status="graph_extracting")
-                    # 拼接所有节点文本用于实体抽取
-                    full_text = "\n\n".join(n.get_content() for n in nodes)
-                    entity_count = await knowledge_graph_service.process_document(
-                        text=full_text,
-                        doc_id=str(doc_id),
-                    )
-                    logger.info(
-                        "文件 %s 知识图谱抽取完成：%d 个实体", original_filename, entity_count,
-                    )
+                if not knowledge_graph_service.available:
+                    return
+                await self.pg.update_document_status(doc_id, status="graph_extracting")
+                full_text = "\n\n".join(n.get_content() for n in nodes)
+                entity_count = await knowledge_graph_service.process_document(
+                    text=full_text,
+                    doc_id=str(doc_id),
+                )
+                logger.info(
+                    "文件 %s 知识图谱抽取完成：%d 个实体", original_filename, entity_count,
+                )
+
+            milvus_task = _asyncio.create_task(_do_milvus())
+            kg_task = _asyncio.create_task(_do_kg())
+
+            # 等待 Milvus（必须成功），KG 失败仅记录不影响索引
+            await milvus_task
+            try:
+                await kg_task
             except Exception as e:
                 logger.warning(
                     "文件 %s 知识图谱抽取失败（非致命）: %s", original_filename, e,
                 )
+
+            await self.pg.update_document_status(
+                doc_id, status="indexed", chunk_count=len(nodes),
+            )
         except Exception as e:
             logger.exception("索引文件 %s 失败: %s", original_filename, e)
             await self.pg.update_document_status(

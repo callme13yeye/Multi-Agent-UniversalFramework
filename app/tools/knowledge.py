@@ -63,12 +63,14 @@ async def async_knowledge_query_ask(
         logger.info("[缓存命中] question=%s", question[:40])
         return cached["answer"]
 
-    # ── Step 1-4: RetrievalPipeline 统一检索 ────────────────
-    nodes = await pipeline.retrieve(
+    # ── Step 1-4: RetrievalPipeline 统一检索（含图谱增强） ──
+    result = await pipeline.retrieve_with_graph(
         question=question,
         user_id=user_id,
         session_id=session_id,
     )
+    nodes = result.get("nodes", [])
+    graph_context = result.get("graph_context")
 
     if not nodes:
         logger.info(f"[知识库查询] 管道检索未返回结果")
@@ -76,7 +78,7 @@ async def async_knowledge_query_ask(
         return "知识库中未找到相关信息。"
 
     # ── 相关性兜底检查：最高分低于阈值则视为无相关内容 ──
-    MIN_RELEVANCE_SCORE = 0.70
+    MIN_RELEVANCE_SCORE = 0.75
     top_score = nodes[0].score or 0.0
     if top_score < MIN_RELEVANCE_SCORE:
         logger.info(
@@ -86,7 +88,7 @@ async def async_knowledge_query_ask(
         await redis_manager.delete(f"{SOURCES_KEY_PREFIX}{user_id}:{session_id}")
         return "知识库中未找到与您的问题相关的内容。"
 
-    # ── 记录来源文件 ─
+    # ── 记录来源（含精确位置，供前端定位和引用展示）──
     top_k = min(len(nodes), pipeline.top_k)
     seen_content = set()
     sources_list = []
@@ -101,6 +103,11 @@ async def async_knowledge_query_ask(
         seen_content.add(content_hash)
         sources_list.append({
             "file_name": n.node.metadata.get("file_name", "未知来源"),
+            "chunk_index": n.node.metadata.get("chunk_index"),
+            "chunk_total": n.node.metadata.get("chunk_total"),
+            "page_label": n.node.metadata.get("page_label", ""),
+            "heading": n.node.metadata.get("heading", ""),
+            "chunk_summary": n.node.metadata.get("chunk_summary", content[:80].replace("\n", " ")),
             "snippet": content[:300],
             "score": round(float(n.score or 0), 4),
             "node_id": n.node.node_id,
@@ -113,7 +120,7 @@ async def async_knowledge_query_ask(
     else:
         await redis_manager.delete(sources_key)
 
-    # ── Step 5: 基于检索结果生成回答 ────────────────────────
+    # ── Step 5: 基于检索结果 + 图谱上下文生成回答 ────────────
     llama_model = _get_llm_for_retrieval()
     if llama_model is None:
         return "语言模型未初始化"
@@ -124,15 +131,40 @@ async def async_knowledge_query_ask(
         if n.score is not None and n.score < SOURCE_MIN_SCORE:
             continue
         context_idx += 1
-        source = n.node.metadata.get("file_name", "未知来源")
+
+        # ── 精确位置标签（文档名 + 页码 + 段落，而非仅文件名）──
+        file_name = n.node.metadata.get("file_name", "未知来源")
+        page_label = n.node.metadata.get("page_label", "")
+        heading = n.node.metadata.get("heading", "")
+        chunk_idx = n.node.metadata.get("chunk_index")
+        chunk_total = n.node.metadata.get("chunk_total")
+
+        location_parts = [f"《{file_name}》"]
+        if page_label:
+            location_parts.append(f"第{page_label}页")
+        if heading:
+            location_parts.append(f"「{heading}」")
+        elif chunk_idx is not None and chunk_total is not None and chunk_total > 1:
+            location_parts.append(f"第{chunk_idx + 1}/{chunk_total}段")
+        location_str = " · ".join(location_parts)
+
         content = n.node.get_content()
-        context_parts.append(f"[{context_idx}] 来源({source}):\n{content}")
+        context_parts.append(f"[{context_idx}] {location_str}:\n{content}")
     context_text = "\n\n".join(context_parts)
+
+    # 图谱上下文（知识图谱中的实体和关系）
+    graph_text = ""
+    if graph_context is not None and hasattr(graph_context, "to_context_text"):
+        graph_text = graph_context.to_context_text()
+    if graph_text:
+        logger.info("[知识库查询] 图谱上下文已注入 (%d 字符)", len(graph_text))
 
     system_prompt = (
         "你是一个企业知识库助手。请严格基于以下参考资料回答问题。\n"
         "要求:\n"
-        "- 优先使用参考资料回答，必须标注引用编号如 [1][2]\n"
+        "- 每个事实断言必须标注引用出处，格式为 [N]，N 对应参考资料的编号\n"
+        "- 引用放在被引内容之后，如：年假为 5 个工作日 [3]\n"
+        "- 一段引用可同时引用多个编号，如 [1][4]\n"
         "- 如果参考资料不足以回答问题，请明确告知用户\"当前知识库暂无相关内容\"\n"
         "- 禁止编造资料中不存在的信息\n"
         "- 使用中文回答\n"
@@ -140,9 +172,11 @@ async def async_knowledge_query_ask(
 
     try:
         logger.info(f"[知识库查询] 检索到 {len(nodes)} 个节点，取 top-{top_k} 生成回答……")
+        # 将图谱上下文拼接到参考资料之后
+        graph_section = f"\n\n知识图谱（实体关系参考）:\n{graph_text}" if graph_text else ""
         prompt = (
             f"{system_prompt}\n\n"
-            f"参考资料:\n{context_text}\n\n"
+            f"参考资料:\n{context_text}{graph_section}\n\n"
             f"问题: {question}\n回答:"
         )
         llm_response = await llama_model.acomplete(prompt)

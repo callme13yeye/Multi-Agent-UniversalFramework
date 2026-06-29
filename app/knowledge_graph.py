@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -132,9 +133,12 @@ class GraphContext:
         if self.entities:
             parts.append("**相关实体:**")
             for e in self.entities[:15]:
+                source = e.get("source_doc_id", "")
+                source_tag = f" 📎来源: {source}" if source else ""
                 parts.append(
                     f"- [{e.get('type', 'ENTITY')}] **{e.get('name', '?')}**"
                     f"{': ' + e.get('description', '') if e.get('description') else ''}"
+                    f"{source_tag}"
                 )
 
         if self.relations:
@@ -179,8 +183,13 @@ class KnowledgeGraphService:
     def __init__(self, gateway: Any = None):
         self._gateway = gateway
 
-    def _get_llm(self):
-        """获取图谱抽取用的 LLM。"""
+    # ── 公开 API ──────────────────────────────────────────────
+
+    def get_llm(self):
+        """获取图谱抽取/检索用的 LLM（公开接口）。
+
+        优先从 ModelGateway 动态获取，gateway 未就绪时返回 None。
+        """
         if self._gateway is not None:
             from app.gateway.types import ModelRole
             chain = self._gateway.get_model_chain(ModelRole.RETRIEVAL_LLM)
@@ -188,10 +197,67 @@ class KnowledgeGraphService:
                 return chain[0][1]
         return None
 
+    # 向后兼容别名（旧代码可能还在用 _get_llm）
+    _get_llm = get_llm
+
     @property
     def available(self) -> bool:
         """知识图谱服务是否可用。"""
         return neo4j_manager.available
+
+    # ── 关键词提取（供工具和检索管道复用）────────────────────
+
+    async def extract_keywords(
+        self,
+        query: str,
+        context: str = "",
+        max_keywords: int = 5,
+    ) -> list[str]:
+        """从查询文本中提取图谱搜索关键词。
+
+        LLM 可用时用 LLM 提取实体名/概念词；不可用时回退到启发式规则。
+        Args:
+            query: 查询文本
+            context: 可选的附加上下文（如文档片段）
+            max_keywords: 最多返回关键词数
+
+        Returns:
+            关键词列表，最多 max_keywords 个
+        """
+        llm = self.get_llm()
+        if llm is not None:
+            context_section = f"\n相关上下文:\n{context}" if context else ""
+            prompt = f"""从以下问题中提取用于知识图谱搜索的实体名称关键词。
+只输出关键词，每行一个，最多 {max_keywords} 个。
+
+规则：
+- 提取实体名称（人名、部门名、政策名、概念、术语等）
+- 去掉疑问词和停用词
+- 如果没有明确实体，提取核心概念词
+
+问题: {query}{context_section}
+
+关键词（每行一个）:"""
+
+            try:
+                response = await llm.acomplete(prompt)
+                keywords = [
+                    line.strip().lstrip("- ").strip()
+                    for line in response.text.strip().split("\n")
+                    if line.strip() and len(line.strip()) >= 2
+                ]
+                if keywords:
+                    logger.debug("[KG] LLM 提取关键词: %s", keywords[:max_keywords])
+                    return keywords[:max_keywords]
+            except Exception as e:
+                logger.debug("[KG] LLM 关键词提取失败，回退启发式: %s", e)
+
+        # 回退：正则分词
+        import re
+        return [
+            w for w in re.split(r'[，。、；\s,.;：:？?！!]+', query)
+            if len(w) >= 2
+        ][:max_keywords]
 
     # ── 实体和关系抽取 ───────────────────────────────────────
 
@@ -315,7 +381,7 @@ class KnowledgeGraphService:
         relations: list[Relation],
         doc_id: str = "",
     ) -> int:
-        """将实体和关系批量写入 Neo4j。
+        """将实体和关系批量写入 Neo4j（UNWIND 批量写入，减少网络往返）。
 
         使用 MERGE 实现幂等去重（同名同类型实体只创建一次，
         但会更新 description 和来源信息）。
@@ -334,18 +400,19 @@ class KnowledgeGraphService:
 
         stored_count = 0
 
-        # 批量写入实体（MERGE 去重）
-        for entity in entities:
+        # ── 批量写入实体（UNWIND 单次网络往返） ──────────────
+        if entities:
             try:
-                await neo4j_manager.run_write(
+                records = await neo4j_manager.run_write(
                     """
-                    MERGE (e:Entity {name: $name, type: $type})
+                    UNWIND $entities AS entity
+                    MERGE (e:Entity {name: entity.name, type: entity.type})
                     SET e.description = CASE
-                        WHEN $description <> '' THEN $description
+                        WHEN entity.description <> '' THEN entity.description
                         ELSE COALESCE(e.description, '')
                     END
                     SET e.source_doc_id = CASE
-                        WHEN $source_doc_id <> '' THEN $source_doc_id
+                        WHEN entity.source_doc_id <> '' THEN entity.source_doc_id
                         ELSE COALESCE(e.source_doc_id, '')
                     END
                     SET e.updated_at = datetime()
@@ -353,35 +420,70 @@ class KnowledgeGraphService:
                         MERGE (d:Document {doc_id: $doc_id})
                         MERGE (e)-[:MENTIONED_IN]->(d)
                     )
-                    RETURN e.name, e.type
+                    RETURN count(e) AS stored_count
                     """,
                     {
-                        "name": entity.name,
-                        "type": entity.type,
-                        "description": entity.description,
-                        "source_doc_id": entity.source_doc_id,
+                        "entities": [e.to_dict() for e in entities],
                         "doc_id": doc_id,
                     },
                 )
-                stored_count += 1
+                if records:
+                    stored_count = records[0].get("stored_count", len(entities))
             except Exception as e:
-                logger.warning("[KG] 实体写入失败 '%s': %s", entity.name, e)
+                logger.warning("[KG] 实体批量写入失败，回退逐条写入: %s", e)
+                # 回退：逐个写入（兼容 Neo4j 旧版本不支持 UNWIND 的情况）
+                for entity in entities:
+                    try:
+                        await neo4j_manager.run_write(
+                            """
+                            MERGE (e:Entity {name: $name, type: $type})
+                            SET e.description = CASE
+                                WHEN $description <> '' THEN $description
+                                ELSE COALESCE(e.description, '')
+                            END
+                            SET e.source_doc_id = CASE
+                                WHEN $source_doc_id <> '' THEN $source_doc_id
+                                ELSE COALESCE(e.source_doc_id, '')
+                            END
+                            SET e.updated_at = datetime()
+                            FOREACH (_ IN CASE WHEN $doc_id <> '' THEN [1] ELSE [] END |
+                                MERGE (d:Document {doc_id: $doc_id})
+                                MERGE (e)-[:MENTIONED_IN]->(d)
+                            )
+                            """,
+                            {
+                                "name": entity.name,
+                                "type": entity.type,
+                                "description": entity.description,
+                                "source_doc_id": entity.source_doc_id,
+                                "doc_id": doc_id,
+                            },
+                        )
+                        stored_count += 1
+                    except Exception as e2:
+                        logger.warning("[KG] 实体写入失败 '%s': %s", entity.name, e2)
 
-        # 批量写入关系（MERGE 去重）
+        # ── 批量写入关系（按类型分组，每组一次 UNWIND） ─────
+        from collections import defaultdict
+
+        rels_by_type: dict[str, list[Relation]] = defaultdict(list)
         for rel in relations:
-            try:
-                # 动态 Cypher — 关系类型作为变量不安全，用字符串拼接并校验
-                rel_type = rel.relation.replace("`", "").replace("'", "")
-                if not rel_type or len(rel_type) > 50:
-                    rel_type = "RELATED_TO"
+            # 清理关系类型名称
+            rel_type = rel.relation.replace("`", "").replace("'", "")
+            if not rel_type or len(rel_type) > 50:
+                rel_type = "RELATED_TO"
+            rels_by_type[rel_type].append(rel)
 
+        for rel_type, rels in rels_by_type.items():
+            try:
                 await neo4j_manager.run_write(
                     f"""
-                    MATCH (a:Entity {{name: $source}})
-                    MATCH (b:Entity {{name: $target}})
+                    UNWIND $relations AS rel
+                    MATCH (a:Entity {{name: rel.source}})
+                    MATCH (b:Entity {{name: rel.target}})
                     MERGE (a)-[r:`{rel_type}`]->(b)
                     SET r.description = CASE
-                        WHEN $description <> '' THEN $description
+                        WHEN rel.description <> '' THEN rel.description
                         ELSE COALESCE(r.description, '')
                     END
                     SET r.source_doc_id = CASE
@@ -389,19 +491,23 @@ class KnowledgeGraphService:
                         ELSE COALESCE(r.source_doc_id, '')
                     END
                     SET r.updated_at = datetime()
-                    RETURN a.name, type(r), b.name
                     """,
                     {
-                        "source": rel.source,
-                        "target": rel.target,
-                        "description": rel.description,
+                        "relations": [
+                            {
+                                "source": r.source,
+                                "target": r.target,
+                                "description": r.description,
+                            }
+                            for r in rels
+                        ],
                         "doc_id": doc_id,
                     },
                 )
             except Exception as e:
                 logger.warning(
-                    "[KG] 关系写入失败 (%s)-[%s]->(%s): %s",
-                    rel.source, rel.relation, rel.target, e,
+                    "[KG] 关系批量写入失败 (type=%s, count=%d): %s",
+                    rel_type, len(rels), e,
                 )
 
         logger.info("[KG] 存储完成: %d 个实体 (doc=%s)", stored_count, doc_id)
@@ -446,16 +552,27 @@ class KnowledgeGraphService:
         chunks = chunks[:max_chunks]
 
         total_entities = 0
+
+        # 并行抽取所有分块（LLM 调用是主要瓶颈，chunk 间无依赖）
+        semaphore = asyncio.Semaphore(5)  # 限制并发数，避免触发 API 限流
+
+        async def _extract_one(i: int, chunk: str):
+            async with semaphore:
+                entities, relations = await self.extract_entities(
+                    chunk, doc_id=doc_id, max_entities=15,
+                )
+                logger.debug("[KG] 分块 %d/%d: +%d 实体", i + 1, len(chunks), len(entities))
+                return entities, relations
+
+        results = await asyncio.gather(*[
+            _extract_one(i, chunk) for i, chunk in enumerate(chunks)
+        ])
+
         all_entities: list[Entity] = []
         all_relations: list[Relation] = []
-
-        for i, chunk in enumerate(chunks):
-            entities, relations = await self.extract_entities(
-                chunk, doc_id=doc_id, max_entities=15,
-            )
+        for entities, relations in results:
             all_entities.extend(entities)
             all_relations.extend(relations)
-            logger.debug("[KG] 分块 %d/%d: +%d 实体", i + 1, len(chunks), len(entities))
 
         # 全局去重后批量写入
         seen = set()
@@ -512,7 +629,8 @@ class KnowledgeGraphService:
                 """
                 MATCH (e:Entity)
                 WHERE e.name CONTAINS $keyword
-                RETURN e.name AS name, e.type AS type, e.description AS description
+                RETURN e.name AS name, e.type AS type, e.description AS description,
+                       e.source_doc_id AS source_doc_id
                 LIMIT 10
                 """,
                 {"keyword": kw},
@@ -537,9 +655,11 @@ class KnowledgeGraphService:
                 WHERE a.name IN $names
                 RETURN DISTINCT
                     a.name AS source_name, a.type AS source_type,
+                    a.source_doc_id AS source_doc_id,
                     type(r) AS relation, r.description AS rel_desc,
                     b.name AS target_name, b.type AS target_type,
-                    b.description AS target_desc
+                    b.description AS target_desc,
+                    b.source_doc_id AS target_source_doc_id
                 LIMIT $max_relations
                 """,
                 {
@@ -553,15 +673,16 @@ class KnowledgeGraphService:
                 t_name = rec.get("target_name", "")
 
                 # 收集实体
-                for n, nt, nd in [
-                    (s_name, rec.get("source_type"), None),
-                    (t_name, rec.get("target_type"), rec.get("target_desc")),
+                for n, nt, nd, ns in [
+                    (s_name, rec.get("source_type"), None, rec.get("source_doc_id")),
+                    (t_name, rec.get("target_type"), rec.get("target_desc"), rec.get("target_source_doc_id")),
                 ]:
                     if n and not any(e["name"] == n for e in graph_entities):
                         graph_entities.append({
                             "name": n,
                             "type": nt or "UNKNOWN",
                             "description": nd or "",
+                            "source_doc_id": ns or "",
                         })
 
                 # 收集关系
@@ -645,7 +766,7 @@ class KnowledgeGraphService:
         query: str,
         limit: int = 10,
     ) -> list[dict]:
-        """全文搜索实体。
+        """全文搜索实体（优先使用 fulltext 索引，失败回退 CONTAINS）。
 
         Args:
             query: 搜索关键词
@@ -657,12 +778,35 @@ class KnowledgeGraphService:
         if not neo4j_manager.available:
             return []
 
-        # 先用 CONTAINS 进行模糊匹配
+        # 转义 Lucene 特殊字符，避免 fulltext query 解析报错
+        import re as _re
+        safe_query = _re.sub(r'([+\-&|!(){}\[\]^"~*?:\\])', r'\\\1', query)
+
+        try:
+            records = await neo4j_manager.run_query(
+                """
+                CALL db.index.fulltext.queryNodes("entity_name_ft", $query)
+                YIELD node, score
+                RETURN node.name AS name, node.type AS type,
+                       node.description AS description,
+                       node.source_doc_id AS source_doc_id, score
+                ORDER BY score DESC
+                LIMIT $limit
+                """,
+                {"query": safe_query, "limit": limit},
+            )
+            if records:
+                return [dict(r) for r in records]
+        except Exception as e:
+            logger.debug("[KG] fulltext 索引查询失败，回退 CONTAINS: %s", e)
+
+        # 回退：CONTAINS 子串匹配（fulltext 索引不存在时）
         records = await neo4j_manager.run_query(
             """
             MATCH (e:Entity)
             WHERE e.name CONTAINS $query OR e.description CONTAINS $query
-            RETURN e.name AS name, e.type AS type, e.description AS description
+            RETURN e.name AS name, e.type AS type, e.description AS description,
+                   e.source_doc_id AS source_doc_id
             ORDER BY e.updated_at DESC
             LIMIT $limit
             """,
