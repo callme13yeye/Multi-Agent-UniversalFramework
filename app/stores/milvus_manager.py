@@ -172,7 +172,7 @@ class MilvusDatabaseManager:
 
         依赖 pg_db_manager 查询用户凭证（延迟导入避免循环依赖）。
         """
-        from app.pg_database import pg_db_manager
+        from app.stores.pg_database import pg_db_manager
 
         user = await pg_db_manager.get_user_by_id(user_id)
         if not user:

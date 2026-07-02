@@ -19,10 +19,10 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.postgres.aio import AsyncPostgresStore
-    from app.task_context import TaskContextManager
+    from app.harness.task_context import TaskContextManager
 
 from app.harness.event_bus import EventBus
-from app.task_context import JournalEntry
+from app.harness.task_context import JournalEntry
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ class ApprovalNotHandledError(Exception):
             f"任务 {task_id}: 已连续 {rounds} 轮未处理审批标记 "
             f"[HUMAN_APPROVAL_REQUIRED]，强制中断"
         )
+
+
 
 
 class TaskStatus(str, Enum):
@@ -192,7 +194,11 @@ class TaskExecutor:
         task_id: str,
         resume_data: dict[str, Any],
     ) -> TaskHandle:
-        """恢复被挂起的任务（如 Human-in-the-Loop 审批完成）。"""
+        """恢复被挂起的任务（如 Human-in-the-Loop 审批完成）。
+
+        支持两种恢复模式：
+        1. 普通 HITL 审批 → Command(resume=...) 恢复 LangGraph 执行
+        """
         handle = self._handles.get(task_id)
         if not handle:
             raise ValueError(f"任务不存在: {task_id}")
@@ -200,9 +206,12 @@ class TaskExecutor:
         if handle.status != TaskStatus.WAITING_HUMAN:
             raise ValueError(f"任务 {task_id} 状态为 {handle.status.value}，不能恢复")
 
+        action = resume_data.get("action", "approved")
+        comment = resume_data.get("comment", "")
+
+        # ── 普通 HITL 恢复 ──
         logger.info("[TaskExecutor] 恢复任务: %s ← %s", task_id, resume_data)
 
-        # 用 Command(resume=...) 恢复 LangGraph 执行
         from langgraph.types import Command
 
         bg_task = asyncio.create_task(
@@ -395,7 +404,7 @@ class TaskExecutor:
                     ):
                         # ── 真正持久化快照到 Store，重启后可恢复 ──
                         if self.context_manager is not None:
-                            from app.task_context import TaskSnapshot
+                            from app.harness.task_context import TaskSnapshot
 
                             snapshot = TaskSnapshot(
                                 task_id=task_id,
@@ -446,7 +455,7 @@ class TaskExecutor:
         根据结果动态调整、需要审批时通过 request_approval 工具暂停。
         """
         # ── 继承请求 trace_id，追加 task_id 形成子链路 ──
-        from app.trace_context import trace_context
+        from app.harness.trace_context import trace_context
         trace_context.set_task_context(handle.task_id)
 
         config = {
@@ -728,13 +737,10 @@ class TaskExecutor:
         """将 Executor DeepAgent 的输出同步回 TaskHandle + 写入 journal。
 
         DeepAgent 的 astream(stream_mode="updates") 每个 event 是 {node_name: state_update}。
-        同时做三件事：
+        同时做四件事：
         1. 提取最新 AI 消息 → handle.progress（对外可观测性）
         2. 检测新增消息 → 写入 task_journal（内部执行记忆）
         3. 检测未处理的审批标记 → 兜底中断（P0 安全机制）
-
-        Journal 写入的是"这一步发生了什么"的结构化记录。
-        与 messages 不同，journal 不参与 Summarization 压缩，作为永久执行记忆保留。
         """
         from langchain_core.messages import AIMessage, ToolMessage
 
@@ -845,6 +851,8 @@ class TaskExecutor:
                 rounds=current,
                 approval_id=approval_id,
             )
+
+    # ── Journal 写入辅助 ──────────────────────────────────
 
     async def _write_journal_from_messages(
         self,
@@ -1158,7 +1166,7 @@ class TaskExecutor:
         if self.context_manager is None:
             return
 
-        from app.task_context import TaskSnapshot
+        from app.harness.task_context import TaskSnapshot
 
         snapshot = TaskSnapshot(
             task_id=handle.task_id,

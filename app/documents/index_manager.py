@@ -13,11 +13,10 @@ from typing import Any, Dict, Optional
 
 from miniopy_async import Minio
 
-from app.async_get_index import async_get_milvus_index
-from app.document_processor import process_document
-from app.milvus_manager import milvus_db_manager
-from app.node_parser_factory import resolve_parser_strategy
-from app.pg_database import DatabaseManager, pg_db_manager
+from app.documents.document_processor import process_document
+from app.stores.milvus_manager import milvus_db_manager
+from app.documents.node_parser_factory import resolve_parser_strategy
+from app.stores.pg_database import DatabaseManager, pg_db_manager
 from app.utils.file_hash import compute_file_hash
 
 logger = logging.getLogger(__name__)
@@ -277,6 +276,7 @@ class IndexManager:
             # 两者使用不同资源（Milvus=本地CPU embedding, KG=远程LLM API），
             # 无依赖关系，并行可节省约 40s+ 的索引时间。
             async def _do_milvus():
+                from app.async_get_index import async_get_milvus_index
                 index = await async_get_milvus_index(user_id=user_id, embed_model=embed_model)
                 await index.ainsert_nodes(nodes)
                 logger.info("文件 %s 索引完成：%s 个节点", original_filename, len(nodes))

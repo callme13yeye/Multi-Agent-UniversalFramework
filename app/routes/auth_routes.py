@@ -6,7 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.pydantic_models import UserRegister, TokenResponse, UserInfo, LoginRequest
 from app.auth import register_user, authenticate_user, get_current_user
 from app.utils.jwt import create_access_token
-from app.pg_database import pg_db_manager
+from app.stores import pg_db_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])

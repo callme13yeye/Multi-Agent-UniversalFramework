@@ -76,8 +76,13 @@ class QueryRewriter:
 <COMPLEX 类型: 生成 0-1 个变体，保持原文精度>
 <SPECIFIC 类型: 不生成变体，此行留空>"""
 
+        llm = self._get_llm()
+        if llm is None:
+            logger.warning("[QueryRewriter] LLM 不可用，回退原文")
+            return [question]
+
         try:
-            response = await self._get_llm().acomplete(prompt)
+            response = await llm.acomplete(prompt)
             lines = response.text.strip().split("\n")
 
             # 解析查询类型

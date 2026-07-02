@@ -12,7 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from typing import Optional
 
 from app.auth import get_current_user, get_current_user_sse
-from app.index_manager import index_manager
+from app.documents import index_manager
 from app.pydantic_models import DocumentInfo, DocumentListResponse, DocumentReplaceResponse
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def list_documents(
     current_user: int = Depends(get_current_user),
 ):
     """列出用户文档，支持按文件名模糊搜索和分页"""
-    from app.pg_database import pg_db_manager
+    from app.stores import pg_db_manager
 
     offset = (page - 1) * page_size
     documents, total = await pg_db_manager.search_user_documents(
@@ -101,7 +101,7 @@ async def view_document_file(
     current_user: int = Depends(get_current_user),
 ):
     """查看文件内容 — PDF/图片可浏览器内预览，其他类型触发下载"""
-    from app.pg_database import pg_db_manager
+    from app.stores import pg_db_manager
 
     doc = await pg_db_manager.get_document(doc_id)
     if not doc or doc["user_id"] != current_user:
@@ -160,8 +160,8 @@ async def document_events(
     current_user: int = Depends(get_current_user_sse),
 ):
     """SSE 端点：文档状态变更时主动推送给前端"""
-    from app.document_event_bus import document_event_bus
-    from app.pg_database import pg_db_manager
+    from app.documents import document_event_bus
+    from app.stores import pg_db_manager
     from datetime import datetime, timezone
 
     sub_id = document_event_bus.subscribe()

@@ -3,8 +3,7 @@
 # 职责：判断任务复杂度 → 简单任务直接处理 / 复杂任务创建后台任务。
 # 不做规划、不做编排、不做结果中转 —— 这些是 Executor DeepAgent 的职责。
 #
-# Specialist 列表从 discover_specialist_agents() 的实际结果动态生成，
-# 不再手动维护 ROUTING_RULES。
+# Specialist 列表和工具列表均从实际注册中心动态生成，无需手动维护。
 
 
 def build_routing_table(subagents: list[dict]) -> dict[str, str]:
@@ -23,8 +22,60 @@ def build_routing_table(subagents: list[dict]) -> dict[str, str]:
     }
 
 
+def _build_tool_section() -> str:
+    """从 TOOL_REGISTRY 动态生成工具列表段。
+
+    按模块自动分类，新增工具无需手动更新 prompt。
+    使用 _TOOL_SOURCES 获取工具的真实来源模块（避免 @tool 装饰器改写 __module__）。
+    """
+    from app.tools._registry import TOOL_REGISTRY, _TOOL_SOURCES
+
+    # 模块 → 分类标签映射
+    _MODULE_CATEGORIES: dict[str, str] = {
+        "app.tools.common": "通用工具",
+        "app.tools.knowledge": "知识检索",
+        "app.tools.graph_query": "知识图谱",
+        "app.tools.approval": "人审确认",
+        "app.tools.request_approval": "人审确认",
+        "app.tools.task": "任务管理",
+        "app.tools.task_query": "任务管理",
+        "app.tools.read_journal": "日志读取",
+    }
+
+    _CATEGORY_ORDER = ["通用工具", "知识检索", "知识图谱", "人审确认", "任务管理", "日志读取"]
+
+    categorized: dict[str, list[tuple[str, str]]] = {}
+    uncategorized: list[tuple[str, str]] = []
+
+    for name, tool in TOOL_REGISTRY.items():
+        module = _TOOL_SOURCES.get(name, "")
+        desc = (tool.description or "").split("\n")[0]  # 只取第一行
+        category = _MODULE_CATEGORIES.get(module)
+        if category:
+            categorized.setdefault(category, []).append((name, desc))
+        else:
+            uncategorized.append((name, desc))
+
+    lines: list[str] = []
+    for cat in _CATEGORY_ORDER:
+        tools_in_cat = categorized.get(cat, [])
+        if tools_in_cat:
+            lines.append(f"### {cat}（直接调用，无需委托）")
+            for name, desc in tools_in_cat:
+                lines.append(f"- **{name}**: {desc}")
+            lines.append("")
+
+    if uncategorized:
+        lines.append("### 领域工具")
+        for name, desc in uncategorized:
+            lines.append(f"- **{name}**: {desc}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def build_triage_prompt(subagents: list[dict] | None = None) -> str:
-    """从实际 subagent 列表动态生成 DeepAgent Triage 层的 system prompt。
+    """从实际 subagent 列表 + TOOL_REGISTRY 动态生成 Triage system prompt。
 
     与 Executor DeepAgent 的分工：
     - Triage（本层）：判断任务复杂度 → 简单问题直接处理 / 复杂问题交给后台引擎
@@ -38,16 +89,17 @@ def build_triage_prompt(subagents: list[dict] | None = None) -> str:
         subagents = []
 
     routing_table = build_routing_table(subagents)
+    tool_section = _build_tool_section()
 
     table_rows = "\n".join(
         f"| {desc} | ``{name}`` |"
         for name, desc in routing_table.items()
     )
 
-    return f"""你是 Moka 招聘系统的 **AI 助手**。
+    return f"""你是企业 Multi-Agent 系统的 **AI 助手**。
 
 你的唯一职责是**判断任务复杂度并分流**：
-- **简单任务** → 你直接处理：通用问题直接用工具，招聘问题委托给对应 Specialist
+- **简单任务** → 你直接处理：通用问题直接用工具，专业问题委托给对应 Specialist
 - **复杂任务** → 调用 ``create_background_task`` 工具，交给后台引擎处理
 
 你**不负责**规划、编排、结果中转或进度跟踪——那些由后台引擎完成。
@@ -63,7 +115,7 @@ def build_triage_prompt(subagents: list[dict] | None = None) -> str:
 
 处理方式：
 - **通用简单问题**（时间、天气、搜索、常识问答）：直接使用对应工具处理，**不需要委托给 Specialist**
-- **需要招聘领域能力的问题**：调用 ``task`` 工具委托给对应的 Specialist
+- **需要专业领域能力的问题**：调用 ``task`` 工具委托给对应的 Specialist
 - 将返回结果**提炼关键信息**后回复用户，不要原样转达完整输出
 - ⚠️ **如果 Specialist 的返回结果中包含 ``[HUMAN_APPROVAL_REQUIRED]`` 标记**：
   这说明任务实际上涉及审批流程，你在当前对话中无法处理。
@@ -94,14 +146,9 @@ def build_triage_prompt(subagents: list[dict] | None = None) -> str:
 
 | 用户问题 | 判断 | 处理方式 |
 |---------|------|---------|
-| "现在几点" | 简单 | 直接调用 async_get_current_time → 回复 |
-| "今天天气怎么样" | 简单 | 直接调用 async_web_search → 回复 |
-| "公司年假政策是什么" | 简单 | 直接调用 async_knowledge_query_ask → 回复 |
-| "查一下张三的简历" | 简单 | task → talent_search_specialist |
-| "这个 JD 的要点是什么" | 简单 | task → job_management_specialist |
-| "帮产品部招一个高级后端工程师" | 复杂 | create_background_task |
-| "筛选本月所有 P7 候选人并做匹配度分析" | 复杂 | create_background_task |
-| "跟进最近三个 Offer 的审批进度" | 复杂 | create_background_task |
+| "现在几点" | 简单 | 直接调用时间工具 → 回复 |
+| "今天天气怎么样" | 简单 | 直接调用搜索工具 → 回复 |
+| "公司年假政策是什么" | 简单 | 直接调用知识库检索工具 → 回复 |
 | "我之前创建的任务进展如何" | 查询 | get_task_status → 根据实际状态回复 |
 | "任务 task-xxx 怎么样了" | 查询 | get_task_status(task_id="task-xxx") → 回复详情 |
 
@@ -113,21 +160,19 @@ def build_triage_prompt(subagents: list[dict] | None = None) -> str:
 
 ## 三、可用工具
 
-### 通用工具（简单问题直接调用，无需委托）
-- **async_get_current_time**: 查询当前时间（直接返回，不需委托 Specialist）
-- **async_web_search**: 联网搜索实时信息（天气、新闻等公开信息）
-- **async_knowledge_query_ask**: 查询企业知识库（公司内部文档/政策/规定）
+系统已自动为你绑定以下工具，根据场景选择合适的调用：
 
-### 委托工具
-- **task**: 委托招聘领域任务给 Specialist（单次调用，同步返回）。仅当问题需要招聘
-  领域专业能力时使用——通用问题直接调用上面的通用工具即可。
+{tool_section}
+### 委托/任务工具
+- **task**: 委托专业领域任务给 Specialist（单次调用，同步返回）。仅当问题需要专业
+  领域能力时使用——通用问题直接调用上面的工具即可。
 - **create_background_task**: 将复杂任务转为后台异步执行（任务创建后立即返回）
 - **get_task_status**: 查询后台任务状态、进度和结果。当用户询问"我之前创建的
   任务怎么样了"时使用。不传 task_id 时列出当前会话所有任务概览。
 
 ## 四、约束
 
-- 涉及写操作（推送简历、发起审批），必须先向用户确认关键信息
+- 涉及写操作（推送数据、发起审批），必须先向用户确认关键信息
 - 跨 Specialist 的协作**不要**自己协调——直接创建后台任务
 - 用户询问后台任务进展时，**必须调用 ``get_task_status``** 获取实际状态，不要编造
 - **不要编造信息**——知识库没有的内容，明确告知用户

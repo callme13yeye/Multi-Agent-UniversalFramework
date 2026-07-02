@@ -226,7 +226,7 @@ async def async_graph_search(
     )
 
     # ── 组装双通道结果 ──────────────────────────────────────
-    if not entities and ctx.is_empty() and not vector_section:
+    if not graph_section and not vector_section:
         return f"未找到与「{entity_name}」相关的实体或文档。"
 
     parts = []

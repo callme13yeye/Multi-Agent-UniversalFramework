@@ -5,7 +5,7 @@ import logging
 from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.core import VectorStoreIndex
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from app.pg_database import pg_db_manager
+from app.stores.pg_database import pg_db_manager
 
 logger = logging.getLogger(__name__)
 milvus_url = os.getenv("MILVUS_URL")

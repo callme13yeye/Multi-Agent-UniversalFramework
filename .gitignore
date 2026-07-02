@@ -34,3 +34,7 @@ models/
 
 # UV
 .pytest_cache/
+
+# Sandbox
+.sandbox_tmp/
+.sandbox_venv/

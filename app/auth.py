@@ -10,9 +10,9 @@ from typing import Optional, Dict, Any
 from fastapi import HTTPException, status, Depends, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from app.pg_database import pg_db_manager
+from app.stores import pg_db_manager
 from app.utils.argon2id import hash_password, verify_password
-from app.milvus_manager import milvus_db_manager
+from app.stores import milvus_db_manager
 from app.utils.credentials_encryption_decrypt import create_encrypt_credential
 from app.utils.jwt import decode_access_token
 

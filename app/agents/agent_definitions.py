@@ -6,7 +6,7 @@ agent_definitions.py — Specialist SubAgent 定义。
 
 使用方式::
 
-    from app.agent_definitions import discover_specialist_agents
+    from app.agents import discover_specialist_agents
 
     # 工具从 TOOL_REGISTRY 自动获取，按 AGENT.md 的 allowed_tools 分组
     subagents = discover_specialist_agents()
@@ -168,7 +168,11 @@ def discover_specialist_agents(
         SubAgent 列表，可直接传给 ``create_deep_agent(subagents=...)``。
     """
     if subagents_dir is None:
-        subagents_dir = os.path.join(os.path.dirname(__file__), "subagents")
+        # __file__ = app/agents/agent_definitions.py
+        # → os.path.dirname = app/agents/
+        # → 上翻一级 = app/
+        # → app/subagents/ 为实际 SubAgent 目录
+        subagents_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "subagents")
 
     subagents_path = Path(subagents_dir)
     agents: list[SubAgent] = []

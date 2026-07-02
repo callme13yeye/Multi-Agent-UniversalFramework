@@ -84,7 +84,7 @@ class GatewayMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respons
         通过 current_handler contextvar 向 StatusCallbackHandler 推送降级/恢复事件。
         """
         # 延迟导入避免循环依赖
-        from app.status_handler import current_handler
+        from app.harness.status_handler import current_handler
 
         status_handler = current_handler.get()
         model_chain = self.gateway.get_model_chain(self.role)

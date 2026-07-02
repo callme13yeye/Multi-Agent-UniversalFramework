@@ -46,6 +46,7 @@ logger.info("工具注册中心初始化完成 — %d 个模块, %d 个工具已
 from app.tools.resources import (  # noqa: E402, F401
     register_knowledge_resource,
     register_task_executor,
+    get_task_executor,
     SOURCES_KEY_PREFIX,
     PENDING_QA_KEY_PREFIX,
 )

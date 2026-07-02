@@ -170,7 +170,7 @@ class DeadLetterQueue:
             logger.debug("[DeadLetter] 幂等检查异常（非致命）: %s", e)
 
         # 计算首次退避时间
-        from app.trace_context import _trace_id
+        from app.harness.trace_context import _trace_id
         trace_id = _trace_id.get()
 
         entry = DeadLetterEntry(

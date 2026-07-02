@@ -13,8 +13,8 @@ from llama_index.readers.file import PyMuPDFReader, PandasExcelReader, DocxReade
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.ingestion import IngestionPipeline
 
-from app.node_parser_factory import get_node_parser
-from app.datacleaning import DataCleaningComponent
+from app.documents.node_parser_factory import get_node_parser
+from app.documents.datacleaning import DataCleaningComponent
 
 logger = logging.getLogger(__name__)
 

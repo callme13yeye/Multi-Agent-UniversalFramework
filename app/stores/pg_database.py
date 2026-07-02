@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from app.utils.credentials_encryption_decrypt import decrypt_credential
-from app.document_event_bus import document_event_bus
 
 PROJECT_ROOT = Path(__file__).parent.parent
 ENV_PATH = PROJECT_ROOT / "key.env"
@@ -301,6 +300,7 @@ class DatabaseManager:
                 "SELECT user_id FROM user_documents WHERE id = $1", doc_id,
             )
         if row:
+            from app.documents import document_event_bus
             await document_event_bus.publish(doc_id, status, row["user_id"])
 
     async def list_user_documents(self, user_id: int) -> list[dict]:

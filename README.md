@@ -139,8 +139,8 @@ python main.py
                 │ 调用领域专家
                 ▼
         ┌───────────────────────┐
-        │  Specialist SubAgents │  ← 8 个领域专家
-        │  Moka API / RAG 工具   │
+        │  Specialist SubAgents │  ← 动态发现的领域专家
+        │  通用工具 / RAG 检索    │
         └───────────────────────┘
 ```
 
@@ -248,9 +248,7 @@ agentrag/
 │   ├── trace_context.py       # 全链路 trace_id 传播
 │   ├── status_handler.py      # Agent 运行时状态回调
 │   │
-│   ├── subagents/             # Specialist Sub-Agent 定义（8 个领域专家）
-│   │   ├── general/           # 通用助手
-│   │   ├── recruitment_*/     # 招聘领域专家（简历/面试/Offer/人才/职位/分析/审批）
+│   ├── subagents/             # Specialist Sub-Agent 定义（自进化引擎动态生成）
 │   │
 │   ├── tools/                 # 工具注册中心（16 个工具）
 │   │   ├── _registry.py       # TOOL_REGISTRY + @register_tool 装饰器
@@ -258,7 +256,7 @@ agentrag/
 │   │   ├── knowledge.py       # 知识库 RAG 检索
 │   │   ├── task.py            # 后台任务创建
 │   │   ├── approval.py        # 审批工具
-│   │   └── moka_*.py          # Moka API 封装
+│   │   └── generated_*.py     # 自进化引擎生成的工具
 │   │
 │   ├── prompts/               # Triage / Executor system prompt
 │   ├── schemas/               # SubAgent 输出 Schema 管理

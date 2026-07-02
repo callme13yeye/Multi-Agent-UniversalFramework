@@ -7,6 +7,36 @@
 #
 # Triage 和 Executor 是同一个 DeepAgent 类型（都带 SubAgentMiddleware），
 # 区别仅在于 system prompt 和工具配置。
+#
+# Specialist 列表和工具列表均从实际注册中心动态生成，无需手动维护。
+
+
+def _build_executor_tool_section() -> str:
+    """从 TOOL_REGISTRY 动态生成 Executor 工具列表。
+
+    Executor 使用的工具集是 TOOL_REGISTRY 的子集（request_approval, read_task_journal），
+    加上 SubAgentMiddleware 注入的 ``task`` 工具。
+    """
+    from app.tools import TOOL_REGISTRY
+
+    lines: list[str] = []
+
+    # task 由 SubAgentMiddleware 注入，始终可用
+    lines.append(
+        "- **task**: 将子任务委托给上表中的 Specialist。每次调用会创建一个\n"
+        "  独立的子 Agent，它拥有自己领域的专业工具。调用时指定\n"
+        "  ``subagent_type``（上表中的名称）和 ``description``（具体做什么）。"
+    )
+
+    if "request_approval" in TOOL_REGISTRY:
+        desc = (TOOL_REGISTRY["request_approval"].description or "").split("\n")[0]
+        lines.append(f"- **request_approval**: {desc}")
+
+    if "read_task_journal" in TOOL_REGISTRY:
+        desc = (TOOL_REGISTRY["read_task_journal"].description or "").split("\n")[0]
+        lines.append(f"- **read_task_journal**: {desc}")
+
+    return "\n\n".join(lines)
 
 
 def build_executor_prompt(subagents: list[dict]) -> str:
@@ -17,8 +47,9 @@ def build_executor_prompt(subagents: list[dict]) -> str:
                    每个元素包含 name, description, system_prompt 等字段。
     """
     specialist_table = _build_specialist_table(subagents)
+    tool_section = _build_executor_tool_section()
 
-    return f"""你是 Moka 招聘系统的 **后台任务执行者**。
+    return f"""你是企业 Multi-Agent 系统的 **后台任务执行者**。
 
 你的职责是：收到一个复杂任务目标后，自主制定执行计划、逐步委托合适的
 Specialist 执行、根据每步的结果动态调整计划、需要人类审批时主动暂停、
@@ -52,17 +83,7 @@ Specialist 执行、根据每步的结果动态调整计划、需要人类审批
 
 ## 可用工具
 
-- **task**: 将子任务委托给上表中的 Specialist。每次调用会创建一个
-  独立的子 Agent，它拥有自己领域的专业工具。调用时指定
-  ``subagent_type``（上表中的名称）和 ``description``（具体做什么）。
-
-- **request_approval**: 当 Specialist 返回了需要人类审批的结果时，
-  调用此工具暂停任务。传入 Specialist 输出中的 ``approval_id``。
-  任务会挂起等待审批人决策，审批完成后自动恢复。
-
-- **read_task_journal**: 读取当前任务的执行日志。当上下文被压缩后
-  需要回顾早期步骤、不确定某步骤是否已完成、或需要根据历史决策
-  调整策略时使用。传入 ``limit`` 控制返回条数。
+{tool_section}
 
 ## 约束
 

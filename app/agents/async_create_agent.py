@@ -8,8 +8,8 @@
 #   并注入 task 工具，让 Router Agent 可以 spawn Specialist Agent。
 # - 不传 subagents 时行为与之前一致（向后兼容）。
 from typing import Literal, Any, Type, Optional, Sequence
-from pydantic import BaseModel
 
+from pydantic import BaseModel
 from langgraph.config import get_config
 from app.async_load_model import AsyncLoadModel
 from deepagents import create_deep_agent, SubAgent, CompiledSubAgent

@@ -1,6 +1,10 @@
 # app/pydantic_models.py
-from pydantic import BaseModel
+from __future__ import annotations
+
 from typing import Optional
+
+from pydantic import BaseModel
+
 
 # ---------- 认证相关 ----------
 class UserRegister(BaseModel):

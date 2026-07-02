@@ -17,7 +17,7 @@ from app.tools.resources import (
     knowledge_resources,
     _get_llm_for_retrieval,
 )
-from app.redis_manager import redis_manager
+from app.stores import redis_manager
 
 logger = logging.getLogger(__name__)
 

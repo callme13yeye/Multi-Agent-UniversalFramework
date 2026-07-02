@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import time
 # 猴子补丁，官方BUG
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 _original_del = AsyncBatchedBaseStore.__del__
@@ -13,46 +14,30 @@ AsyncBatchedBaseStore.__del__ = safe_del
 from app.tools import (
     register_knowledge_resource,
     register_task_executor,
-    SOURCES_KEY_PREFIX,
-    PENDING_QA_KEY_PREFIX,
 )
-from app.retrieval import RetrievalPipeline
-from app.agent_definitions import discover_specialist_agents
+from app.tools import TOOL_REGISTRY as _TOOL_REGISTRY
+from app.harness import ToolHotReloader, SubAgentHotReloader
+from app.documents import RetrievalPipeline, index_manager
+from app.agents import discover_specialist_agents, async_create_agent
 from app.prompts import build_triage_prompt, build_executor_prompt
-from app.harness import EventBus, TaskExecutor, TaskHandle, TaskStatus, DeadLetterQueue
-from app.task_context import TaskContextManager, JournalEntry
-from langchain.messages import AIMessageChunk
-from app.async_create_agent import async_create_agent
+from app.harness import EventBus, TaskExecutor, DeadLetterQueue, TaskContextManager
 from app.async_load_model import AsyncLoadModel
-from app.pg_database import pg_db_manager
-from app.milvus_manager import milvus_db_manager
-from app.redis_manager import redis_manager
-from app.neo4j_manager import neo4j_manager
+from app.stores import pg_db_manager, milvus_db_manager, redis_manager, neo4j_manager
 from app.knowledge_graph import knowledge_graph_service
-from app.index_manager import index_manager
-from app.auth import get_current_user, get_current_user_sse
-from app.pydantic_models import ChatRequest, ChatContext, FeedbackRequest, FeedbackResponse, SourcesResponse
-from app.routes import auth_routes, session_routes, upload_routes, document_routes
-from app.async_ensure_user_skills_init import ensure_user_skills_init
+from app.pydantic_models import ChatContext
+from app.routes import auth_routes, session_routes, upload_routes, document_routes, chat_routes, task_routes
 from app.routes.admin_routes import router as admin_router
-from app.evolution.admin_router import router as evolution_router
-from app.status_handler import StatusCallbackHandler
 from app.gateway import ModelGateway, ModelRole, ModelSpec
 from app.gateway.rate_limit_middleware import RateLimitMiddleware
-from app.trace_context import trace_context, TraceIdFilter
+from app.harness.trace_context import TraceIdFilter
 from miniopy_async import Minio
 from config import get_config
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from typing import AsyncGenerator
-from sse_starlette.sse import EventSourceResponse
 from contextlib import asynccontextmanager
-from langfuse.langchain import CallbackHandler
 
 import uvicorn
-import uuid
-import json
 import logging
 
 
@@ -65,64 +50,124 @@ config = get_config()
 embed_model_path_dir = config.get("embed_model_path")
 rerank_model_path_dir = config.get("rerank_model_path")
 langchain_chat_model_name = config.get("langchain_chat_model_name")
-llama_chat_model_name = config.get("llama_chat_model_name")
 fallback_model_name = config.get("fallback_model_name")
 
-tools: list = []
+def _build_triage_tools() -> list:
+    """从 TOOL_REGISTRY 收集 Triage Agent 的全部可用工具。
 
-# ── 构建 Triage Agent 工具集 ──────────────────────────────────
-# Triage 直接持有通用工具，简单问题（时间/搜索/知识库）无需委托 Specialist
-# 复杂招聘任务仍通过 task 工具委托给 Specialist，或通过 create_background_task 转为后台
-from app.tools import TOOL_REGISTRY as _TOOL_REGISTRY
-if "create_background_task" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["create_background_task"])
-if "get_task_status" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["get_task_status"])
-if "async_get_current_time" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["async_get_current_time"])
-if "async_web_search" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["async_web_search"])
-if "async_knowledge_query_ask" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["async_knowledge_query_ask"])
-if "async_graph_query" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["async_graph_query"])
-if "async_graph_search" in _TOOL_REGISTRY:
-    tools.append(_TOOL_REGISTRY["async_graph_search"])
+    Triage 层持有所有工具，system prompt 引导 LLM 根据场景选择合适的工具。
+    新增工具放入 app/tools/ 后由热加载器自动重载并重建 Agent，无需重启。
+    """
+    return list(_TOOL_REGISTRY.values())
 
 
-async def initialize_model():
-    embed_model = await AsyncLoadModel.async_local_load_embed_model(embed_model_path_dir)
-    rerank_model = await AsyncLoadModel.async_local_load_rerank_model(rerank_model_path_dir)
-    langchain_chat_llm = await AsyncLoadModel.async_langchain_api_model(langchain_chat_model_name)
-    llama_chat_llm = await AsyncLoadModel.async_llama_index_api_model(llama_chat_model_name)
-    langchain_fallback_chat_llm = await AsyncLoadModel.async_langchain_fallback_api_model(fallback_model_name)
-    llama_fallback_chat_llm = await AsyncLoadModel.async_llama_fallback_api_model(fallback_model_name)
+def _build_executor_tools() -> list:
+    """从 TOOL_REGISTRY 收集 Executor Agent 的专用工具。"""
+    tools: list = []
+    if "request_approval" in _TOOL_REGISTRY:
+        tools.append(_TOOL_REGISTRY["request_approval"])
+    if "read_task_journal" in _TOOL_REGISTRY:
+        tools.append(_TOOL_REGISTRY["read_task_journal"])
+    return tools
 
-    # ── 启动时校验主备模型联通性 ──
-    try:
-        test_resp = await langchain_chat_llm.ainvoke(
-            [{"role": "user", "content": "ping"}]
+
+_rebuild_lock = asyncio.Lock()
+_last_rebuild_time: float = 0.0
+_REBUILD_COOLDOWN: float = 3.0  # 秒 — 短防抖窗口，避免 Tool + SubAgent 同时变更触发两次完整重建
+
+
+async def _rebuild_agents(app) -> None:
+    """热重载回调：重新发现 SubAgent + 重建 Triage/Executor Agent，原子替换 app.state。
+
+    使用 asyncio.Lock 防止并发热重载（工具 + SubAgent 同时变更时只重建一次）。
+    使用短防抖窗口（3 秒）避免两个热加载器在毫秒级间隔内触发两次重建。
+    若重建中途失败，回滚保留旧 Agent，避免新旧 Agent 混用。
+    """
+    global _last_rebuild_time
+    logger = logging.getLogger("uvicorn")
+
+    async with _rebuild_lock:
+        # ── 短防抖：如果距离上次重建不足冷却时间，跳过（锁内检查，避免 TOCTOU）──
+        now = time.monotonic()
+        if now - _last_rebuild_time < _REBUILD_COOLDOWN:
+            logger.debug("[HotReload] 防抖跳过（距上次重建 %.1fs）", now - _last_rebuild_time)
+            return
+        # ── 保存旧状态（用于失败回滚）──
+        old_agent = getattr(app.state, "agent", None)
+        old_subagents = getattr(app.state, "specialist_subagents", None)
+
+        # 重新发现 Specialist Sub-Agents（支持新增/修改 AGENT.md 后无需重启）
+        try:
+            subagents = discover_specialist_agents()
+            app.state.specialist_subagents = subagents
+            logger.info("[HotReload] 重新发现 %d 个 Specialist Agent", len(subagents))
+        except Exception as e:
+            logger.warning("[HotReload] SubAgent 重新发现失败，沿用旧列表: %s", e)
+            subagents = old_subagents if old_subagents is not None else []
+
+        triage_prompt = build_triage_prompt(subagents)
+        executor_prompt = build_executor_prompt(subagents)
+        gateway = app.state.model_gateway
+
+        # 重建 Triage Agent
+        triage_tools = _build_triage_tools()
+        try:
+            new_triage = await async_create_agent(
+                langchain_chat_model_name,
+                fallback_model_name,
+                triage_tools,
+                system_prompt=triage_prompt,
+                checkpointer=app.state.checkpointer,
+                store=app.state.store,
+                context_schema=ChatContext,
+                subagents=subagents,
+                gateway=gateway,
+            )
+        except Exception:
+            logger.exception("[HotReload] ❌ Triage Agent 重建失败，回滚")
+            if old_subagents is not None:
+                app.state.specialist_subagents = old_subagents
+            return
+
+        # 重建 Executor Agent
+        executor_tools = _build_executor_tools()
+        try:
+            new_executor = await async_create_agent(
+                langchain_chat_model_name,
+                fallback_model_name,
+                executor_tools,
+                system_prompt=executor_prompt,
+                checkpointer=app.state.checkpointer,
+                store=app.state.store,
+                context_schema=ChatContext,
+                subagents=subagents,
+                gateway=gateway,
+                interrupt_on={"request_approval": True},
+            )
+        except Exception:
+            logger.exception("[HotReload] ❌ Executor Agent 重建失败，回滚 Triage")
+            # 回滚：若 Triage 已更新，恢复旧的
+            if old_agent is not None:
+                app.state.agent = old_agent
+            if old_subagents is not None:
+                app.state.specialist_subagents = old_subagents
+            return
+
+        # 原子替换
+        app.state.agent = new_triage
+        app.state.executor_agent = new_executor
+        if hasattr(app.state, "task_executor"):
+            app.state.task_executor.executor_agent = new_executor
+
+        _last_rebuild_time = time.monotonic()
+        logger.info(
+            "[HotReload] ✅ Agent 已重建 (triage_tools=%d, executor_tools=%d, subagents=%d)",
+            len(triage_tools), len(executor_tools), len(subagents),
         )
-        logger.info(f"[主模型] ✅ {langchain_chat_model_name} 联通正常")
-    except Exception as e:
-        logger.warning(f"[主模型] ❌ {langchain_chat_model_name} 不可用: {e}")
 
-    try:
-        test_resp = await langchain_fallback_chat_llm.ainvoke(
-            [{"role": "user", "content": "ping"}]
-        )
-        logger.info(f"[备用模型] ✅ {fallback_model_name} 联通正常")
-    except Exception as e:
-        logger.warning(f"[备用模型] ❌ {fallback_model_name} 不可用: {e}")
 
-    return {
-        "embed_model": embed_model,
-        "rerank_model": rerank_model,
-        "langchain_chat_llm": langchain_chat_llm,
-        "llama_chat_llm": llama_chat_llm,
-        "langchain_fallback_chat_llm": langchain_fallback_chat_llm,
-        "llama_fallback_chat_llm": llama_fallback_chat_llm,
-    }
+# ── 构建初始 Triage Agent 工具集 ──────────────────────────────
+tools = _build_triage_tools()
 
 
 async def _load_model_for_role(name: str, provider: str, api_key_env: str, base_url_env: str, interface: str):
@@ -442,40 +487,26 @@ async def lifespan(app: FastAPI):
     logger.info("[main] DeadLetterQueue 初始化完成（后台扫描已启动 + 审批重试处理器已注册）")
     # ── 两层架构初始化结束 ─────────────────────────────
 
-    # ── 自进化系统初始化 ─────────────────────────────────
-    evo_config = config.get("evolution", {})
-    if evo_config.get("enabled", True):
-        try:
-            from app.evolution import EvolutionManager, evolution_state
+    # ── 启动 Tool 热加载器 ──────────────────────────────
+    # 监听 app/tools/ 目录，文件新增/修改时自动重载并重建 Agent
+    from pathlib import Path as _Path
+    _tools_dir = _Path(__file__).parent / "app" / "tools"
+    _hot_reloader = ToolHotReloader(
+        tools_dir=_tools_dir,
+        on_reload=lambda: _rebuild_agents(app),
+    )
+    await _hot_reloader.start()
+    app.state._hot_reloader = _hot_reloader
 
-            evolution_state.set_store(app.state.store)
-
-            evolution_manager = EvolutionManager(
-                store=app.state.store,
-                event_bus=event_bus,
-                context_manager=context_manager,
-                app_state=app.state,
-            )
-            app.state.evolution_manager = evolution_manager
-
-            # 从 Store 恢复持久化状态
-            await evolution_manager.load_state()
-
-            # 启动定时扫描
-            scan_interval = evo_config.get("scan_interval_hours", 6.0)
-            await evolution_manager.start_scheduled_scan(interval_hours=scan_interval)
-
-            logger.info(
-                "[main] EvolutionManager 初始化完成 (scan_interval=%.1fh, lookback=%dh)",
-                scan_interval,
-                evo_config.get("analysis_lookback_hours", 24),
-            )
-        except Exception as e:
-            logger.warning("[main] 自进化系统初始化失败（非致命）: %s", e, exc_info=True)
-            app.state.evolution_manager = None
-    else:
-        app.state.evolution_manager = None
-        logger.info("[main] 自进化系统已禁用 (evolution.enabled=false)")
+    # ── 启动 SubAgent 热加载器 ───────────────────────────
+    # 监听 app/subagents/ 目录，AGENT.md 新增/修改/删除时自动重建 Agent
+    _subagents_dir = _Path(__file__).parent / "app" / "subagents"
+    _subagent_hot_reloader = SubAgentHotReloader(
+        subagents_dir=_subagents_dir,
+        on_reload=lambda: _rebuild_agents(app),
+    )
+    await _subagent_hot_reloader.start()
+    app.state._subagent_hot_reloader = _subagent_hot_reloader
 
     try:
         minio_client = Minio(
@@ -513,16 +544,19 @@ async def lifespan(app: FastAPI):
             if hasattr(app.state, 'dead_letter_queue'):
                 await app.state.dead_letter_queue.stop_scanner()
 
-            # Step 2.5: 停止自进化定时扫描
-            if hasattr(app.state, 'evolution_manager') and app.state.evolution_manager:
-                await app.state.evolution_manager.stop_scheduled_scan()
-                logger.info("[shutdown] EvolutionManager 定时扫描已停止")
+            # Step 3: 停止工具热加载器
+            if hasattr(app.state, '_hot_reloader'):
+                await app.state._hot_reloader.stop()
 
-            # Step 3: 停止网关健康探活（已优化为 1 秒内响应取消）
+            # Step 3b: 停止 SubAgent 热加载器
+            if hasattr(app.state, '_subagent_hot_reloader'):
+                await app.state._subagent_hot_reloader.stop()
+
+            # Step 4: 停止网关健康探活（已优化为 1 秒内响应取消）
             if hasattr(app.state, 'model_gateway'):
                 await app.state.model_gateway.stop_probe()
 
-            # Step 4: 并行关闭数据库连接池
+            # Step 5: 并行关闭数据库连接池
             #         放在最后 — 确保没有任务还在写入
             await asyncio.gather(
                 pg_db_manager.close(),
@@ -554,591 +588,8 @@ app.include_router(session_routes.router)
 app.include_router(upload_routes.router)
 app.include_router(document_routes.router)
 app.include_router(admin_router)
-# 自进化系统管理路由（仅在启用时注册）
-if config.get("evolution", {}).get("enabled", True):
-    app.include_router(evolution_router)
-
-async def generate_sessions_title(user_message: str, assistant_message: str, llm) -> str:
-    if not assistant_message:
-        return f"新对话"
-    prompt = f"""请根据以下对话内容生成一个5-15个字的简短标题，只输出标题本身，不要解释，不要引号，不要多余标点。
-             用户问题: {user_message[:200]}
-             助手回答: {assistant_message[:200]}
-             标题:
-             """
-    try:
-        response = await llm.ainvoke(prompt)
-        title = response.content.strip().replace("\n", "")[:15]
-        return title if title else "新标题"
-    except Exception as e:
-        logger.warning(f"生成标题错误: {e}", exc_info=True)
-        return f"新对话"
-
-async def _inject_task_results(
-    store,
-    session_id: str,
-) -> list[dict]:
-    """从 Store 读取本会话中已完成但 Triage 尚未引用的任务结果。
-
-    将结果包装为 system 消息，标记为已读后返回。
-    如果没有未读结果，返回空列表。
-
-    Args:
-        store: LangGraph AsyncPostgresStore
-        session_id: 当前对话 session ID
-
-    Returns:
-        可注入到 messages 列表中的消息对象列表（空列表表示无未读结果）
-    """
-    if store is None or not session_id:
-        return []
-
-    try:
-        items = await store.asearch(("task_results", session_id), limit=50)
-    except Exception:
-        return []
-
-    unread = []
-    for item in items:
-        if item.value and not item.value.get("read", False):
-            unread.append((item.key, item.value))
-
-    if not unread:
-        return []
-
-    # 构建注入消息 + 标记已读
-    parts = [
-        "## 📋 本会话中后台任务已完成",
-        "",
-        "以下任务在后台执行完成，用户可能会询问相关进展：",
-        "",
-    ]
-    import json as _json_inject
-
-    for _key, result in unread[-5:]:  # 最多注入最近 5 个
-        status = result.get("status", "unknown")
-        icon = "✅" if status == "completed" else "❌" if status == "failed" else "📌"
-        parts.append(f"- {icon} **{result.get('task_id', '?')}**: {result.get('goal', '')}")
-        summary = result.get("result_summary", "")
-        if summary:
-            parts.append(f"  └ 结果摘要: {summary[:300]}")
-        error = result.get("error_message", "")
-        if error:
-            parts.append(f"  └ 错误: {error[:200]}")
-
-        # 标记已读
-        result["read"] = True
-        try:
-            await store.aput(("task_results", session_id), _key, result)
-        except Exception:
-            pass
-
-    return [{
-        "role": "system",
-        "content": "\n".join(parts),
-    }]
-
-
-async def generate_response_stream(
-        session_id: str,
-        message: str,
-        checkpointer,
-        store,
-        context_data,
-        langfuse_handler: CallbackHandler,
-        agent,
-) -> AsyncGenerator[str, None]:
-    # 配置参数
-    status_queue: asyncio.Queue = asyncio.Queue()
-    status_handler = StatusCallbackHandler(status_queue)
-    # 注入 contextvar，供 GatewayMiddleware 推送降级/恢复状态
-    from app.status_handler import current_handler
-    current_handler.set(status_handler)
-    configurable = {
-        "configurable": {
-            "thread_id": session_id,    # 包含thread_id因为langgraph的键名必须是thread_id
-            "user_id": context_data["user_id"],
-            "session_id": context_data["session_id"],
-            "trace_id": trace_context.current,
-        },
-        "callbacks": [langfuse_handler, status_handler],
-        "metadata": {
-            "langfuse_user_id": context_data["user_id"],
-            "langfuse_session_id": session_id,
-        }
-    }
-
-    # ── 注入本会话中已完成的后台任务结果 ─────────────
-    injected_messages = await _inject_task_results(store, session_id)
-    messages_for_agent = injected_messages + [{"role": "user", "content": message}]
-
-    async def _agent_consumer():
-        """消费 agent.astream 产出，推 content 事件到队列。"""
-        normal_exit = False
-        # ── 推送执行中状态 ──────────────────────────
-        await status_handler.emit_executing()
-        try:
-            async for chunk in agent.astream(
-                {"messages": messages_for_agent},
-                config=configurable,
-                context=ChatContext(
-                    user_id=context_data["user_id"],
-                    session_id=context_data["session_id"],
-                ),
-                stream_mode="messages"
-            ):
-                if isinstance(chunk, (tuple, list)) and len(chunk) > 0:
-                    msg_chunk = chunk[0]
-                    if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.content:
-                        await status_queue.put(json.dumps({
-                            "_type": "content",
-                            "content": msg_chunk.content,
-                            "session_id": session_id,
-                        }))
-            normal_exit = True
-        except asyncio.CancelledError:
-            await status_handler.emit_cancelled()
-        except asyncio.TimeoutError:
-            await status_handler.emit_timeout()
-        except Exception as e:
-            logger.error(f"Agent流式响应错误 (session={session_id}): {e}", exc_info=True)
-            await status_handler.emit_error(f"异常: {e}")
-            await status_queue.put(json.dumps({
-                "_type": "error",
-                "error": str(e),
-                "session_id": session_id,
-            }))
-        finally:
-            # 正常结束推送 completed；异常路径已推送对应状态，不重复
-            if normal_exit:
-                await status_handler.emit_completed()
-            # 发送结束哨兵
-            await status_queue.put(None)
-
-    # 启动后台消费者任务
-    agent_task = asyncio.create_task(_agent_consumer())
-
-    # 从队列读取，自然交错 content 和 status 事件
-    try:
-        while True:
-            item = await status_queue.get()
-            if item is None:
-                break  # agent 流结束
-            yield item
-    finally:
-        # 确保后台任务被清理
-        if not agent_task.done():
-            agent_task.cancel()
-            try:
-                await agent_task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-
-@app.post("/chat")
-async def chat_endpoint(request: ChatRequest, current_user: int = Depends(get_current_user)):
-    # ── 生成 trace_id — 全链路追踪起点 ──
-    trace_id = trace_context.start_trace()
-
-    session_id = request.session_id
-    is_new_session = False
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        is_new_session = True
-    else:
-        # 验证session_id是否属于当前用户
-        owner_id = await pg_db_manager.get_session_owner(session_id)
-        if owner_id != current_user:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问此会话")
-        await pg_db_manager.update_session_last_used(session_id)
-    checkpointer = pg_db_manager.checkpointer
-    store = pg_db_manager.store
-    context_data = {
-        "user_id": str(current_user),
-        "session_id": str(session_id)
-    }
-    await ensure_user_skills_init(store, str(current_user))
-    langfuse_handler = CallbackHandler()
-    async def event_generator():
-        # 清除上一个问题的引用来源，避免泄漏到本次回答
-        await redis_manager.delete(f"{SOURCES_KEY_PREFIX}{current_user}:{session_id}")
-        assistant_message = ""
-        try:
-            async for event in generate_response_stream(
-                session_id,
-                request.message,
-                checkpointer,
-                store,
-                context_data,
-                langfuse_handler,
-                agent=app.state.agent,
-            ):
-                try:
-                    event_data = json.loads(event)
-                    event_type = event_data.get("_type", "content")
-                    if event_type == "content":
-                        assistant_message += event_data.get("content", "")
-                        yield {
-                            "event": "message",
-                            "data": event,
-                        }
-                    elif event_type == "error":
-                        yield {
-                            "event": "error",
-                            "data": event,
-                        }
-                    # event_type == "status" → 推 status 事件，不记入 assistant_message
-                    else:
-                        yield {
-                            "event": "status",
-                            "data": event,
-                        }
-                except json.JSONDecodeError:
-                    pass
-        finally:
-            # 流结束后发送引用来源（从 Redis 读取，跨进程共享）
-            sources_data = await redis_manager.get(f"{SOURCES_KEY_PREFIX}{current_user}:{session_id}")
-            sources = sources_data.get("sources", []) if sources_data else []
-            if sources:
-                try:
-                    yield {
-                        "event": "sources",
-                        "data": json.dumps({"sources": sources})
-                    }
-                except Exception as e:
-                    logger.warning(f"序列化 sources 失败: {e}")
-            if is_new_session:
-                try:
-                    # 从 gateway 获取标题生成用 LLM（优先回退链中的模型）
-                    llm = None
-                    gateway = getattr(app.state, 'model_gateway', None)
-                    if gateway is not None:
-                        chain = gateway.get_model_chain(ModelRole.FALLBACK_CHAT)
-                        if chain:
-                            llm = chain[0][1]
-                    if llm is None:
-                        llm = app.state.knowledge_resources.get("langchain_fallback_chat_llm")
-                    title = await generate_sessions_title(request.message, assistant_message, llm)
-                    await pg_db_manager.create_user_session(current_user, session_id, title)
-                except Exception as e:
-                    logger.error(f"标题生成失败: {e}", exc_info=True)
-                    await pg_db_manager.create_user_session(current_user, session_id, "新对话")
-    return EventSourceResponse(
-        event_generator(),
-        headers={
-            "X-Session-ID": session_id,
-            "X-Trace-Id": trace_id,
-        }
-    )
-
-
-# ── 引用溯源 ───────────────────────────────────
-@app.get("/sources/{session_id}", response_model=SourcesResponse)
-async def get_sources(
-    session_id: str,
-    current_user: int = Depends(get_current_user),
-):
-    """获取指定会话的最新检索来源文件列表。"""
-    owner_id = await pg_db_manager.get_session_owner(session_id)
-    if owner_id != current_user:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问")
-    sources_data = await redis_manager.get(f"{SOURCES_KEY_PREFIX}{current_user}:{session_id}")
-    sources = sources_data.get("sources", []) if sources_data else []
-    return SourcesResponse(sources=sources)
-
-
-# ── 用户反馈 ───────────────────────────────────
-@app.post("/feedback", response_model=FeedbackResponse)
-async def submit_feedback(
-    feedback: FeedbackRequest,
-    current_user: int = Depends(get_current_user),
-):
-    """用户对回答进行评价（点赞写缓存 / 点踩不缓存）。"""
-    owner_id = await pg_db_manager.get_session_owner(feedback.session_id)
-    if owner_id != current_user:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权访问")
-    await pg_db_manager.save_feedback(
-        user_id=current_user,
-        session_id=feedback.session_id,
-        rating=feedback.rating,
-        comment=feedback.comment,
-    )
-
-    # ── 点赞写入 Redis 缓存 / 点踩丢弃 ──────────────────
-    pending_key = f"{PENDING_QA_KEY_PREFIX}{current_user}:{feedback.session_id}"
-    pending = await redis_manager.get(pending_key)
-    if pending:
-        await redis_manager.delete(pending_key)
-    if pending and feedback.rating == 1:
-        cache_key = redis_manager.build_cache_key(
-            pending["question"], user_id=current_user,
-        )
-        await redis_manager.set(
-            cache_key,
-            {"answer": pending["answer"], "sources": pending["sources"]},
-        )
-        logger.info(
-            "点赞写缓存: session=%s question=%s",
-            feedback.session_id, pending["question"][:40],
-        )
-    elif pending and feedback.rating == -1:
-        logger.info(
-            "点踩不缓存: session=%s question=%s",
-            feedback.session_id, pending["question"][:40],
-        )
-
-    logger.info(
-        "反馈记录: user=%d session=%s rating=%d",
-        current_user, feedback.session_id, feedback.rating,
-    )
-    return FeedbackResponse(status="ok")
-
-
-# ── 后台任务管理 ───────────────────────────────────
-
-from pydantic import BaseModel as PydanticBase, Field
-
-
-class TaskResponse(PydanticBase):
-    task_id: str
-    thread_id: str
-    goal: str
-    status: str
-    plan: list[dict] = []
-    progress: str = ""
-    result_summary: str = ""
-    error_message: str = ""
-    created_at: str = ""
-    updated_at: str = ""
-
-
-class TaskResumeRequest(PydanticBase):
-    action: str = Field(..., description="操作: approved / rejected / provide_info")
-    comment: str | None = Field(None, description="备注说明")
-    data: dict | None = Field(None, description="附加数据")
-
-
-# ── 后台任务由 Supervisor 在 POST /chat 内部通过 create_background_task 创建 ──
-# 用户不直接调用 POST /tasks — 任务仅通过对话产生
-
-
-@app.get("/tasks", response_model=list[TaskResponse])
-async def list_tasks(
-    status_filter: str | None = None,
-    current_user: int = Depends(get_current_user),
-):
-    """列出当前用户的后台任务。
-
-    Args:
-        status_filter: 可选状态筛选 (created/executing/waiting_human/completed/failed)
-    """
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        return []
-
-    filter_enum = None
-    if status_filter:
-        try:
-            filter_enum = TaskStatus(status_filter)
-        except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效状态: {status_filter}")
-
-    handles = await executor.list_tasks(status_filter=filter_enum)
-
-    return [
-        TaskResponse(
-            task_id=h.task_id,
-            thread_id=h.thread_id,
-            goal=h.goal,
-            status=h.status.value,
-            plan=h.plan,
-            progress=h.progress,
-            result_summary=h.result_summary,
-            error_message=h.error_message,
-            created_at=h.created_at,
-            updated_at=h.updated_at,
-        )
-        for h in handles
-    ]
-
-
-@app.get("/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(
-    task_id: str,
-    current_user: int = Depends(get_current_user),
-):
-    """查询任务状态与进度。"""
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    handle = await executor.get_task(task_id)
-    if handle is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"任务不存在: {task_id}")
-
-    return TaskResponse(
-        task_id=handle.task_id,
-        thread_id=handle.thread_id,
-        goal=handle.goal,
-        status=handle.status.value,
-        plan=handle.plan,
-        progress=handle.progress,
-        result_summary=handle.result_summary,
-        error_message=handle.error_message,
-        created_at=handle.created_at,
-        updated_at=handle.updated_at,
-    )
-
-
-@app.post("/tasks/{task_id}/resume", response_model=TaskResponse)
-async def resume_task(
-    task_id: str,
-    request: TaskResumeRequest,
-    current_user: int = Depends(get_current_user),
-):
-    """恢复被挂起的任务（如审批决策、补充信息）。
-
-    当任务状态为 waiting_human 时，使用此端点提供决策或信息，
-    Agent 会从上次中断处继续执行。
-    """
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    handle = await executor.get_task(task_id)
-    if handle is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"任务不存在: {task_id}")
-
-    resume_data = {"action": request.action}
-    if request.comment:
-        resume_data["comment"] = request.comment
-    if request.data:
-        resume_data.update(request.data)
-
-    handle = await executor.resume_task(task_id, resume_data)
-
-    return TaskResponse(
-        task_id=handle.task_id,
-        thread_id=handle.thread_id,
-        goal=handle.goal,
-        status=handle.status.value,
-        plan=handle.plan,
-        progress=handle.progress,
-        result_summary=handle.result_summary,
-        error_message=handle.error_message,
-        created_at=handle.created_at,
-        updated_at=handle.updated_at,
-    )
-
-
-@app.delete("/tasks/{task_id}")
-async def cancel_task(
-    task_id: str,
-    current_user: int = Depends(get_current_user),
-):
-    """取消一个正在执行或挂起的任务。"""
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    cancelled = await executor.cancel_task(task_id)
-    if not cancelled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"任务不存在: {task_id}")
-
-    return {"status": "cancelled", "task_id": task_id}
-
-
-@app.get("/tasks/{task_id}/events")
-async def task_events(
-    task_id: str,
-    current_user: int = Depends(get_current_user_sse),
-):
-    """SSE 端点 — 实时推送任务状态变更事件。
-
-    前端可以通过 EventSource 订阅此端点获取任务进度更新。
-    """
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    event_bus = getattr(app.state, "event_bus", None)
-    if event_bus is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    from sse_starlette.sse import EventSourceResponse as SSE
-
-    async def event_stream():
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def handler(data: dict):
-            if data.get("task_id") == task_id:
-                await queue.put(data)
-
-        # 注册事件处理器并持有取消函数，确保连接断开时清理
-        unsubs = [
-            event_bus.subscribe("task.executing", handler),
-            event_bus.subscribe("task.interrupted", handler),
-            event_bus.subscribe("task.completed", handler),
-            event_bus.subscribe("task.failed", handler),
-        ]
-
-        try:
-            while True:
-                try:
-                    event_data = await asyncio.wait_for(queue.get(), timeout=30)
-                    yield {
-                        "event": event_data.get("type", "task_update"),
-                        "data": json.dumps(event_data, ensure_ascii=False, default=str),
-                    }
-                except asyncio.TimeoutError:
-                    yield {"event": "heartbeat", "data": "{}"}
-        except asyncio.CancelledError:
-            pass
-        finally:
-            for unsub in unsubs:
-                unsub()
-
-    return SSE(event_stream())
-
-
-# ── 任务执行日志（Journal） ─────────────────────────
-
-@app.get("/tasks/{task_id}/journal")
-async def get_task_journal(
-    task_id: str,
-    limit: int = 50,
-    current_user: int = Depends(get_current_user),
-):
-    """获取任务的执行日志（journal）。
-
-    Journal 是任务执行过程的结构化记录，每条记录包含时间戳、事件类型、
-    人类可读摘要和结构化详情。与 progress 不同，journal 不受
-    SummarizationMiddleware 压缩影响，提供完整的执行链路可观测性。
-
-    Args:
-        task_id: 任务 ID
-        limit: 返回最近 N 条记录（默认 50，传 0 返回全部）
-    """
-    executor = getattr(app.state, "task_executor", None)
-    if executor is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    handle = await executor.get_task(task_id)
-    if handle is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"任务不存在: {task_id}")
-
-    context_manager: TaskContextManager = getattr(app.state, "context_manager", None)
-    if context_manager is None:
-        return {"task_id": task_id, "journal": [], "count": 0}
-
-    entries = await context_manager.read_journal(task_id, limit=limit)
-    return {
-        "task_id": task_id,
-        "goal": handle.goal,
-        "status": handle.status.value,
-        "journal": [e.to_dict() for e in entries],
-        "count": len(entries),
-    }
+app.include_router(chat_routes.router)
+app.include_router(task_routes.router)
 
 
 if __name__ == "__main__":

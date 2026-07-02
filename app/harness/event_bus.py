@@ -98,7 +98,7 @@ class EventBus:
         """
         # ── 自动注入 trace_id ──
         if "trace_id" not in data:
-            from app.trace_context import _trace_id
+            from app.harness.trace_context import _trace_id
             tid = _trace_id.get()
             if tid:
                 data["trace_id"] = tid

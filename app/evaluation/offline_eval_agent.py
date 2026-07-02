@@ -31,14 +31,14 @@ from deepeval.metrics import (
 from deepeval.tracing import trace
 from deepeval.models import GPTModel
 
-from app.async_create_agent import async_create_agent
+from app.agents import async_create_agent
 from app.tools.common import async_get_current_time, async_web_search
 from app.tools.knowledge import async_knowledge_query_ask
 from app.tools import register_knowledge_resource
 from app.async_load_model import AsyncLoadModel
 from config import get_config
-from app.pg_database import pg_db_manager
-from app.milvus_manager import milvus_db_manager
+from app.stores import pg_db_manager
+from app.stores import milvus_db_manager
 from app.auth import register_user
 
 # ---------- 环境 ----------

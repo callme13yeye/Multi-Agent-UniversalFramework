@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, BackgroundTasks, Request, Form
 
 from app.auth import get_current_user
-from app.index_manager import index_manager
+from app.documents import index_manager
 from app.pydantic_models import UploadResponse
 
 logger = logging.getLogger(__name__)

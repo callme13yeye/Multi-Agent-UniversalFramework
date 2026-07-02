@@ -695,6 +695,7 @@
             cursor: pointer; color: #64748b; transition: 0.2s;
         }
         .task-detail-close:hover { background: #f1f5f9; }
+
     </style>
 </head>
 <body>
@@ -775,6 +776,7 @@
         let taskDetailId = null;             // 当前查看的任务ID
         let taskRefreshTimer = null;         // 自动刷新定时器
         let taskEventSource = null;          // SSE 连接（全局任务状态变更）
+
 
         const DOM = {
             sidebar: document.getElementById('sidebar'),
@@ -2544,6 +2546,7 @@
                 return;
             }
         });
+
     })();
 </script>
 </body>

@@ -14,7 +14,7 @@ trace_id 在请求入口（/chat）生成，通过 contextvars 自动传播到
 
 使用方式::
 
-    from app.trace_context import TraceContext
+    from app.harness.trace_context import TraceContext
 
     ctx = TraceContext()
     trace_id = ctx.start_trace()        # 请求入口

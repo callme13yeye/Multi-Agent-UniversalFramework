@@ -6,8 +6,6 @@
 # 目录结构:
 #   triage_prompt.py    — DeepAgent Triage 层 system prompt（分流判断）
 #   executor_prompt.py  — Executor DeepAgent system prompt（后台任务执行）
-#   gap_detection.py    — GapDetector LLM prompt（能力缺口检测分析）
-#   agent_generation.py — SubAgentGenerator LLM prompt（AGENT.md 生成）
 
 from app.prompts.triage_prompt import build_triage_prompt
 from app.prompts.executor_prompt import build_executor_prompt

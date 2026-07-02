@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from langfuse import observe
 
-from app.neo4j_manager import neo4j_manager
+from app.stores import neo4j_manager
 
 logger = logging.getLogger(__name__)
 

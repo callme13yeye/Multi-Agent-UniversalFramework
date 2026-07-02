@@ -101,15 +101,4 @@ def get_config():
             "global_timeout_seconds": 15.0,    # 全局关闭超时
         },
 
-        # ── 自进化系统配置 ────────────────────────────────
-        "evolution": {
-            "enabled": True,                    # 是否启用自进化系统
-            "scan_interval_hours": 6.0,         # 自动扫描间隔（小时）
-            "analysis_lookback_hours": 24,      # 每次分析回溯多久的任务
-            "max_gaps_per_scan": 5,             # 每次扫描最多生成多少缺口报告
-            "min_tasks_for_analysis": 10,       # 最少需要多少已完成任务才触发分析
-            "auto_approve_threshold": 0.0,      # 自动化审批阈值（0.0=永远人工审批, 1.0=完全自动）
-            "validation_min_pass_rate": 0.7,    # 验证通过率下限
-            "llm_model": "deepseek-v4-flash",   # 进化系统使用的 LLM
-        },
     }
