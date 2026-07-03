@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status,
 
 from app.auth import get_current_user
 from app.documents import index_manager
+from app.documents.document_status import DocumentStatus
 from app.pydantic_models import UploadResponse
 
 logger = logging.getLogger(__name__)
@@ -88,10 +89,10 @@ async def upload_file(
         )
 
     # 重复文件被跳过
-    if result["status"] == "skipped":
+    if result["status"] == DocumentStatus.SKIPPED:
         return UploadResponse(
             filename=file.filename,
-            status="skipped",
+            status=DocumentStatus.SKIPPED,
             message=result["message"],
         )
 
@@ -111,6 +112,6 @@ async def upload_file(
 
     return UploadResponse(
         filename=file.filename,
-        status="processing",
+        status=DocumentStatus.QUEUING,
         message="文件已接收，正在后台处理并添加到知识库……",
     )

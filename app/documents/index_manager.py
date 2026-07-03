@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 from miniopy_async import Minio
 
 from app.documents.document_processor import process_document
+from app.documents.document_status import DocumentStatus
 from app.stores.milvus_manager import milvus_db_manager
 from app.documents.node_parser_factory import resolve_parser_strategy
 from app.stores.pg_database import DatabaseManager, pg_db_manager
@@ -151,7 +152,7 @@ class IndexManager:
                     original_filename, file_hash[:16], parser_strategy,
                 )
                 return {
-                    "status": "skipped",
+                    "status": DocumentStatus.SKIPPED,
                     "doc_id": existing_by_hash["id"],
                     "file_hash": file_hash,
                     "message": "文件已存在，无需重复添加",
@@ -192,17 +193,25 @@ class IndexManager:
         )
 
         # ── 上传 MinIO ──
-        await self.pg.update_document_status(doc_id, status="storing")
-        await minio_client.put_object(
-            BUCKET_NAME,
-            object_name,
-            io.BytesIO(file_data),
-            length=file_size,
-            content_type="application/octet-stream",
-        )
+        await self.pg.update_document_status(doc_id, status=DocumentStatus.STORING)
+        try:
+            await minio_client.put_object(
+                BUCKET_NAME,
+                object_name,
+                io.BytesIO(file_data),
+                length=file_size,
+                content_type="application/octet-stream",
+            )
+        except Exception:
+            logger.exception("MinIO 上传失败: %s", original_filename)
+            await self.pg.update_document_status(
+                doc_id, status=DocumentStatus.FAILED,
+                error_message="MinIO 上传失败",
+            )
+            raise
 
         # ── 排队等待后台处理 ──
-        await self.pg.update_document_status(doc_id, status="queuing")
+        await self.pg.update_document_status(doc_id, status=DocumentStatus.QUEUING)
 
         logger.info(
             "新文件上传: %s (哈希=%s, 策略=%s, doc_id=%s)",
@@ -210,7 +219,7 @@ class IndexManager:
         )
 
         return {
-            "status": "queuing",
+            "status": DocumentStatus.QUEUING,
             "doc_id": doc_id,
             "file_hash": file_hash,
             "object_path": object_name,
@@ -233,7 +242,7 @@ class IndexManager:
         """
         tmp_path = None
         try:
-            await self.pg.update_document_status(doc_id, status="downloading")
+            await self.pg.update_document_status(doc_id, status=DocumentStatus.DOWNLOADING)
 
             object_name = f"{user_id}/{original_filename}"
             suffix = Path(original_filename).suffix
@@ -244,9 +253,8 @@ class IndexManager:
             doc = await self.pg.get_document(doc_id)
             file_hash = doc["file_hash"] if doc else None
 
-            await self.pg.update_document_status(doc_id, status="loading")
-
             # 状态回调：清洗/切分阶段由 process_document 内部触发
+            # （loading 状态也由 process_document 通过 callback 设置）
             async def _doc_status_callback(status: str):
                 await self.pg.update_document_status(doc_id, status=status)
 
@@ -263,12 +271,12 @@ class IndexManager:
             )
             if not nodes:
                 await self.pg.update_document_status(
-                    doc_id, status="indexed", chunk_count=0,
+                    doc_id, status=DocumentStatus.INDEXED, chunk_count=0,
                 )
                 logger.warning("文件 %s 无可提取内容", original_filename)
                 return
 
-            await self.pg.update_document_status(doc_id, status="indexing")
+            await self.pg.update_document_status(doc_id, status=DocumentStatus.INDEXING)
 
             import asyncio as _asyncio
 
@@ -285,7 +293,7 @@ class IndexManager:
                 from app.knowledge_graph import knowledge_graph_service
                 if not knowledge_graph_service.available:
                     return
-                await self.pg.update_document_status(doc_id, status="graph_extracting")
+                await self.pg.update_document_status(doc_id, status=DocumentStatus.GRAPH_EXTRACTING)
                 full_text = "\n\n".join(n.get_content() for n in nodes)
                 entity_count = await knowledge_graph_service.process_document(
                     text=full_text,
@@ -308,12 +316,12 @@ class IndexManager:
                 )
 
             await self.pg.update_document_status(
-                doc_id, status="indexed", chunk_count=len(nodes),
+                doc_id, status=DocumentStatus.INDEXED, chunk_count=len(nodes),
             )
         except Exception as e:
             logger.exception("索引文件 %s 失败: %s", original_filename, e)
             await self.pg.update_document_status(
-                doc_id, status="failed", error_message=str(e),
+                doc_id, status=DocumentStatus.FAILED, error_message=str(e),
             )
         finally:
             if tmp_path is not None:

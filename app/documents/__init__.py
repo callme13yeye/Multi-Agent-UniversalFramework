@@ -12,6 +12,7 @@
 #   retrieval.py            — 统一检索管道（QueryRewriter → MultiRecall+RRF → Rerank → DynamicTopK）
 
 from app.documents.document_processor import process_document
+from app.documents.document_status import DocumentStatus
 from app.documents.index_manager import IndexManager, index_manager
 from app.documents.node_parser_factory import get_node_parser, resolve_parser_strategy
 from app.documents.datacleaning import DataCleaningComponent
@@ -20,6 +21,7 @@ from app.documents.retrieval import RetrievalPipeline, QueryRewriter
 
 __all__ = [
     "process_document",
+    "DocumentStatus",
     "IndexManager", "index_manager",
     "get_node_parser", "resolve_parser_strategy",
     "DataCleaningComponent",

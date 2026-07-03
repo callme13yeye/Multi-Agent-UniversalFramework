@@ -13,6 +13,7 @@ from typing import Optional
 
 from app.auth import get_current_user, get_current_user_sse
 from app.documents import index_manager
+from app.documents.document_status import DocumentStatus
 from app.pydantic_models import DocumentInfo, DocumentListResponse, DocumentReplaceResponse
 
 logger = logging.getLogger(__name__)
@@ -267,7 +268,7 @@ async def replace_document(
     )
 
     return DocumentReplaceResponse(
-        status="processing",
+        status=DocumentStatus.QUEUING,
         message="文件已接收，正在替换并重建索引……",
         new_doc_id=result["doc_id"],
     )

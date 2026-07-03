@@ -15,6 +15,7 @@ from llama_index.core.ingestion import IngestionPipeline
 
 from app.documents.node_parser_factory import get_node_parser
 from app.documents.datacleaning import DataCleaningComponent
+from app.documents.document_status import DocumentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ async def process_document(
         return []
 
     if status_callback:
-        await status_callback("loading")
+        await status_callback(DocumentStatus.LOADING)
 
     # ── MinerU 成功后强制 Markdown 切分策略（保留标题层级）──
     actual_parser_strategy = parser_strategy
@@ -105,13 +106,13 @@ async def process_document(
 
     # ── 清洗阶段 ──
     if status_callback:
-        await status_callback("cleaning")
+        await status_callback(DocumentStatus.CLEANING)
     clean_pipeline = IngestionPipeline(transformations=[DataCleaningComponent()])
     cleaned_docs = await clean_pipeline.arun(documents=documents)
 
     # ── 切分阶段 ──
     if status_callback:
-        await status_callback("splitting")
+        await status_callback(DocumentStatus.SPLITTING)
     split_pipeline = IngestionPipeline(transformations=[parser])
     nodes = await split_pipeline.arun(documents=cleaned_docs)
 

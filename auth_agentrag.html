@@ -470,22 +470,37 @@
             width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
             background: #4b6cb7;
         }
-        .status-dot.thinking { background: #4b6cb7; animation: pulse 1.2s infinite; }
+        /* ── Chat 运行时状态 ── */
+        .status-dot.thinking,
+        .status-dot.planning { background: #4b6cb7; animation: pulse 1.2s infinite; }
         .status-dot.retrieving,
         .status-dot.searching,
+        .status-dot.tool_calling,
+        .status-dot.executing,
         .status-dot.executing_task { background: #d97706; animation: pulse 1.2s infinite; }
+        .status-dot.skill_calling { background: #7c3aed; animation: pulse 1.2s infinite; }
+        .status-dot.summarizing { background: #6366f1; animation: pulse 1.2s infinite; }
         .status-dot.generating { background: #16a34a; animation: pulse 1.2s infinite; }
         .status-dot.retrying { background: #dc2626; animation: pulse 0.4s infinite; }
         .status-dot.completed,
+        .status-dot.restored,
         .status-dot.indexed { background: #16a34a; }
-        .status-dot.failed { background: #dc2626; }
+        .status-dot.failed,
+        .status-dot.timeout,
+        .status-dot.error { background: #dc2626; }
+        .status-dot.degraded { background: #f59e0b; }
+        .status-dot.cancelled { background: #94a3b8; }
+        /* ── 文档处理状态 ── */
+        .status-dot.uploaded,
+        .status-dot.skipped { background: #94a3b8; }
+        .status-dot.storing,
+        .status-dot.queuing,
         .status-dot.downloading,
         .status-dot.loading,
         .status-dot.cleaning,
         .status-dot.splitting,
         .status-dot.indexing,
-        .status-dot.storing,
-        .status-dot.queuing { background: #d97706; animation: pulse 1.2s infinite; }
+        .status-dot.graph_extracting { background: #d97706; animation: pulse 1.2s infinite; }
         .status-label {
             flex: 1; color: #475569; overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap;
@@ -832,20 +847,36 @@
         //  实时状态框
         // =============================================================
         const STATUS_LABELS = {
+            // ── Chat 运行时状态（由 POST /chat SSE 推送）──
+            'executing': '执行中...',
             'thinking': '思考中...',
+            'planning': '规划中...',
             'retrieving': '知识检索中...',
             'searching': '联网搜索中...',
-            'executing_task': '执行任务中...',
+            'skill_calling': '技能调用中...',
+            'tool_calling': '工具调用中...',
+            'summarizing': '上下文压缩中...',
             'generating': '生成回答中...',
             'retrying': '重试中...',
+            'degraded': '已降级备用模型',
+            'restored': '已恢复主模型',
+            'completed': '完成',
+            'cancelled': '已取消',
+            'timeout': '执行超时',
+            'error': '执行异常',
+            // ── 文档处理状态（由 GET /documents/events SSE 推送）──
+            'uploaded': '已上传',
+            'storing': '存储中...',
             'queuing': '排队中...',
             'downloading': '下载文档中...',
             'loading': '解析文档中...',
             'cleaning': '清洗数据中...',
             'splitting': '切分节点中...',
             'indexing': '写入向量库...',
+            'graph_extracting': '知识图谱抽取中...',
             'indexed': '索引完成 ✓',
             'failed': '索引失败 ✗',
+            'skipped': '已跳过（重复文件）',
         };
 
         function addStatusItem(id, label, filename) {
@@ -907,20 +938,17 @@
         }
 
         function getStatusBadge(status) {
-            const map = {
+            // 终态 / 稳定态
+            const FINAL = ['indexed', 'failed', 'uploaded', 'skipped'];
+            const isProcessing = !FINAL.includes(status);
+            // CSS class: processing → amber spinner, indexed → green, failed → red, 其余 → neutral
+            const clsMap = {
                 'indexed': 'status-indexed',
-                'processing': 'status-processing',
-                'uploaded': 'status-uploaded',
                 'failed': 'status-failed',
             };
-            const labels = {
-                'indexed': '✅ 已索引',
-                'processing': '⏳ 处理中',
-                'uploaded': '📤 已上传',
-                'failed': '❌ 失败',
-            };
-            const cls = map[status] || 'status-uploaded';
-            const label = labels[status] || status;
+            const cls = clsMap[status] || (isProcessing ? 'status-processing' : 'status-uploaded');
+            // 显示文本：优先用 STATUS_LABELS，回退到原始状态字符串
+            const label = STATUS_LABELS[status] || status;
             return `<span class="status-badge ${cls}">${label}</span>`;
         }
 
