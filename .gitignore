@@ -38,3 +38,8 @@ models/
 # Sandbox
 .sandbox_tmp/
 .sandbox_venv/
+
+# Test / Utility scripts
+test_api.sh
+test_minio_list.py
+upgrade_pyproject.py
