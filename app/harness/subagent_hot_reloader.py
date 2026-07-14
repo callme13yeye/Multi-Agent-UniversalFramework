@@ -54,16 +54,30 @@ class SubAgentHotReloader:
         logger.info("[SubAgentHotReload] 已停止")
 
     async def _watch_loop(self) -> None:
-        """主监听循环。"""
-        try:
-            async for changes in awatch(self._subagents_dir):
-                if self._stop_event.is_set():
+        """Main watch loop with auto-reconnect on transient errors."""
+        retry_delay = 1.0
+        max_retry_delay = 30.0
+
+        while not self._stop_event.is_set():
+            try:
+                async for changes in awatch(self._subagents_dir):
+                    if self._stop_event.is_set():
+                        break
+                    await self._handle_changes(changes)
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception(
+                    "[SubAgentHotReload] watch loop error, retrying in %.1fs", retry_delay,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=retry_delay,
+                    )
                     break
-                await self._handle_changes(changes)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("[SubAgentHotReload] 监听循环异常退出")
+                except asyncio.TimeoutError:
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
 
     async def _handle_changes(
         self, changes: set[tuple[int, str]]

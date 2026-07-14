@@ -151,7 +151,6 @@ dependencies = [
     { name = "llama-index-readers-file" },
     { name = "llama-index-readers-llama-parse" },
     { name = "llama-index-utils-huggingface" },
-    { name = "llama-index-vector-stores-chroma" },
     { name = "llama-index-vector-stores-milvus" },
     { name = "llama-index-workflows" },
     { name = "llama-parse" },
@@ -415,7 +414,6 @@ requires-dist = [
     { name = "llama-index-readers-file", specifier = "==0.5.6" },
     { name = "llama-index-readers-llama-parse", specifier = "==0.5.1" },
     { name = "llama-index-utils-huggingface", specifier = "==0.4.1" },
-    { name = "llama-index-vector-stores-chroma", specifier = "==0.5.5" },
     { name = "llama-index-vector-stores-milvus", specifier = "==0.9.6" },
     { name = "llama-index-workflows", specifier = "==2.11.5" },
     { name = "llama-parse", specifier = "==0.6.54" },
@@ -2487,19 +2485,6 @@ dependencies = [
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/2f/ac/d4c064f53766389d9da24881aac0ea4898ce4582d695cb80e7725c2e7f9c/llama_index_utils_huggingface-0.4.1.tar.gz", hash = "sha256:32ffd2d3e1d86ac904f258c86d588915366789860ea1e5200df30b163467cea4", size = 4045, upload-time = "2025-09-08T20:34:42.937Z" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/bb/a7/02fe573480e0d8af8feb0e1d6e30938a95db742a1265b01caa7977aaf0bb/llama_index_utils_huggingface-0.4.1-py3-none-any.whl", hash = "sha256:cd24f498277593d31964826e3bf33d04f20ced26030677ea45510625c66c16ec", size = 3692, upload-time = "2025-09-08T20:34:42.196Z" },
-]
-
-[[package]]
-name = "llama-index-vector-stores-chroma"
-version = "0.5.5"
-source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
-dependencies = [
-    { name = "chromadb" },
-    { name = "llama-index-core" },
-]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/10/e7/19d0a81ccba54c5d0c5be46ac3a300ed86eb9e6638375d8b4ceb506bd629/llama_index_vector_stores_chroma-0.5.5.tar.gz", hash = "sha256:823865069bcea4d9de91510271ae03cd6ea8eb0106a5b5ea43ffcec03ec2a708", size = 8262, upload-time = "2025-12-30T00:01:04.091Z" }
-wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a1/3e/eced8b70b63067bf1600faa003f5bcc11c67ce39fcb6efb9aa38ebcc3b05/llama_index_vector_stores_chroma-0.5.5-py3-none-any.whl", hash = "sha256:a1ca18abe2b6b90cd0bdff89fef9fb389bbd3dfb6fc74844bf9100d48d258874", size = 8078, upload-time = "2025-12-30T00:01:03.288Z" },
 ]
 
 [[package]]

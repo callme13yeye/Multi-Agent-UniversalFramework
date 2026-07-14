@@ -73,97 +73,124 @@ def _build_executor_tools() -> list:
 
 _rebuild_lock = asyncio.Lock()
 _last_rebuild_time: float = 0.0
+_deferred_rebuild_task: asyncio.Task | None = None
 _REBUILD_COOLDOWN: float = 3.0  # 秒 — 短防抖窗口，避免 Tool + SubAgent 同时变更触发两次完整重建
 
 
 async def _rebuild_agents(app) -> None:
-    """热重载回调：重新发现 SubAgent + 重建 Triage/Executor Agent，原子替换 app.state。
+    """Hot-reload callback: re-discover SubAgents + rebuild Triage/Executor.
 
-    使用 asyncio.Lock 防止并发热重载（工具 + SubAgent 同时变更时只重建一次）。
-    使用短防抖窗口（3 秒）避免两个热加载器在毫秒级间隔内触发两次重建。
-    若重建中途失败，回滚保留旧 Agent，避免新旧 Agent 混用。
+    Serialized via asyncio.Lock. 3s cooldown to avoid duplicate rebuilds.
+    Full rollback on failure. Deferred rebuild when cooldown suppresses a change.
+    """
+    global _last_rebuild_time, _deferred_rebuild_task
+    logger = logging.getLogger("uvicorn")
+
+    async with _rebuild_lock:
+        now = time.monotonic()
+        elapsed = now - _last_rebuild_time
+        if elapsed < _REBUILD_COOLDOWN:
+            remaining = _REBUILD_COOLDOWN - elapsed
+            logger.info(
+                "[HotReload] cooldown queue (last=%.1fs ago, defer=%.1fs)",
+                elapsed, remaining,
+            )
+            if _deferred_rebuild_task is not None and not _deferred_rebuild_task.done():
+                _deferred_rebuild_task.cancel()
+            _deferred_rebuild_task = asyncio.create_task(
+                _deferred_rebuild(app, remaining)
+            )
+            return
+        await _do_rebuild(app)
+
+
+async def _deferred_rebuild(app, delay: float) -> None:
+    """Deferred rebuild: sleep through remaining cooldown, then rebuild."""
+    try:
+        await asyncio.sleep(delay)
+        await _rebuild_agents(app)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _do_rebuild(app) -> None:
+    """Execute Agent rebuild (must be called under _rebuild_lock).
+
+    Key: subagents written to app.state only at atomic swap, not before.
     """
     global _last_rebuild_time
     logger = logging.getLogger("uvicorn")
 
-    async with _rebuild_lock:
-        # ── 短防抖：如果距离上次重建不足冷却时间，跳过（锁内检查，避免 TOCTOU）──
-        now = time.monotonic()
-        if now - _last_rebuild_time < _REBUILD_COOLDOWN:
-            logger.debug("[HotReload] 防抖跳过（距上次重建 %.1fs）", now - _last_rebuild_time)
-            return
-        # ── 保存旧状态（用于失败回滚）──
-        old_agent = getattr(app.state, "agent", None)
-        old_subagents = getattr(app.state, "specialist_subagents", None)
+    old_agent = getattr(app.state, "agent", None)
+    old_subagents = getattr(app.state, "specialist_subagents", None)
 
-        # 重新发现 Specialist Sub-Agents（支持新增/修改 AGENT.md 后无需重启）
-        try:
-            subagents = discover_specialist_agents()
-            app.state.specialist_subagents = subagents
-            logger.info("[HotReload] 重新发现 %d 个 Specialist Agent", len(subagents))
-        except Exception as e:
-            logger.warning("[HotReload] SubAgent 重新发现失败，沿用旧列表: %s", e)
-            subagents = old_subagents if old_subagents is not None else []
+    # Re-discover Specialist Sub-Agents
+    try:
+        subagents = discover_specialist_agents()
+        num_subagents = len(subagents)
+        logger.info("[HotReload] re-discovered %d Specialist Agent(s)", num_subagents)
+    except Exception as e:
+        logger.warning("[HotReload] SubAgent discovery failed, keeping old list: %s", e)
+        subagents = old_subagents if old_subagents is not None else []
 
-        triage_prompt = build_triage_prompt(subagents)
-        executor_prompt = build_executor_prompt(subagents)
-        gateway = app.state.model_gateway
+    triage_prompt = build_triage_prompt(subagents)
+    executor_prompt = build_executor_prompt(subagents)
+    gateway = app.state.model_gateway
 
-        # 重建 Triage Agent
-        triage_tools = _build_triage_tools()
-        try:
-            new_triage = await async_create_agent(
-                langchain_chat_model_name,
-                fallback_model_name,
-                triage_tools,
-                system_prompt=triage_prompt,
-                checkpointer=app.state.checkpointer,
-                store=app.state.store,
-                context_schema=ChatContext,
-                subagents=subagents,
-                gateway=gateway,
-            )
-        except Exception:
-            logger.exception("[HotReload] ❌ Triage Agent 重建失败，回滚")
-            if old_subagents is not None:
-                app.state.specialist_subagents = old_subagents
-            return
-
-        # 重建 Executor Agent
-        executor_tools = _build_executor_tools()
-        try:
-            new_executor = await async_create_agent(
-                langchain_chat_model_name,
-                fallback_model_name,
-                executor_tools,
-                system_prompt=executor_prompt,
-                checkpointer=app.state.checkpointer,
-                store=app.state.store,
-                context_schema=ChatContext,
-                subagents=subagents,
-                gateway=gateway,
-                interrupt_on={"request_approval": True},
-            )
-        except Exception:
-            logger.exception("[HotReload] ❌ Executor Agent 重建失败，回滚 Triage")
-            # 回滚：若 Triage 已更新，恢复旧的
-            if old_agent is not None:
-                app.state.agent = old_agent
-            if old_subagents is not None:
-                app.state.specialist_subagents = old_subagents
-            return
-
-        # 原子替换
-        app.state.agent = new_triage
-        app.state.executor_agent = new_executor
-        if hasattr(app.state, "task_executor"):
-            app.state.task_executor.executor_agent = new_executor
-
-        _last_rebuild_time = time.monotonic()
-        logger.info(
-            "[HotReload] ✅ Agent 已重建 (triage_tools=%d, executor_tools=%d, subagents=%d)",
-            len(triage_tools), len(executor_tools), len(subagents),
+    # Rebuild Triage Agent
+    triage_tools = _build_triage_tools()
+    try:
+        new_triage = await async_create_agent(
+            langchain_chat_model_name,
+            fallback_model_name,
+            triage_tools,
+            system_prompt=triage_prompt,
+            checkpointer=app.state.checkpointer,
+            store=app.state.store,
+            context_schema=ChatContext,
+            subagents=subagents,
+            gateway=gateway,
         )
+    except Exception:
+        logger.exception("[HotReload] Triage rebuild failed, rollback")
+        return
+
+    # Rebuild Executor Agent
+    executor_tools = _build_executor_tools()
+    try:
+        new_executor = await async_create_agent(
+            langchain_chat_model_name,
+            fallback_model_name,
+            executor_tools,
+            system_prompt=executor_prompt,
+            checkpointer=app.state.checkpointer,
+            store=app.state.store,
+            context_schema=ChatContext,
+            subagents=subagents,
+            gateway=gateway,
+            interrupt_on={"request_approval": True},
+        )
+    except Exception:
+        logger.exception("[HotReload] Executor rebuild failed, rollback all")
+        return
+
+    # Atomic swap
+    app.state.specialist_subagents = subagents
+    app.state.agent = new_triage
+    app.state.executor_agent = new_executor
+    if hasattr(app.state, "task_executor"):
+        app.state.task_executor.executor_agent = new_executor
+        rc = (
+            len(app.state.task_executor._running_tasks)
+            if hasattr(app.state.task_executor, "_running_tasks") else "?"
+        )
+        logger.info("[HotReload] TaskExecutor updated (running_tasks=%s)", rc)
+
+    _last_rebuild_time = time.monotonic()
+    logger.info(
+        "[HotReload] Agents rebuilt (triage=%d tools, executor=%d, subagents=%d)",
+        len(triage_tools), len(executor_tools), len(subagents),
+    )
 
 
 # ── 构建初始 Triage Agent 工具集 ──────────────────────────────

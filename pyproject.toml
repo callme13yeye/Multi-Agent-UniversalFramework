@@ -119,7 +119,6 @@ dependencies = [
     "llama-index-readers-file==0.5.6",
     "llama-index-readers-llama-parse==0.5.1",
     "llama-index-utils-huggingface==0.4.1",
-    "llama-index-vector-stores-chroma==0.5.5",
     "llama-index-vector-stores-milvus==0.9.6",
     "llama-index-workflows==2.11.5",
     "llama-parse==0.6.54",

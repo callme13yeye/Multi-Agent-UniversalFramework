@@ -19,6 +19,7 @@ from app.harness.trace_context import trace_context
 from app.harness.status_handler import StatusCallbackHandler, current_handler
 from app.gateway.types import ModelRole
 from app.agents import ensure_user_skills_init
+from config import get_config
 from app.tools import SOURCES_KEY_PREFIX, PENDING_QA_KEY_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -133,29 +134,44 @@ async def _generate_response_stream(
         normal_exit = False
         # ── 推送执行中状态 ──────────────────────────
         await status_handler.emit_executing()
+        # ── Triage 时间围栏：防止 LLM 误判导致 HTTP 请求无限挂起 ──
+        timeout_seconds = get_config().get("timeouts", {}).get(
+            "triage_run_timeout_seconds", 180.0
+        )
         try:
-            async for chunk in agent.astream(
-                {"messages": messages_for_agent},
-                config=configurable,
-                context=ChatContext(
-                    user_id=context_data["user_id"],
-                    session_id=context_data["session_id"],
-                ),
-                stream_mode="messages"
-            ):
-                if isinstance(chunk, (tuple, list)) and len(chunk) > 0:
-                    msg_chunk = chunk[0]
-                    if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.content:
-                        await status_queue.put(json.dumps({
-                            "_type": "content",
-                            "content": msg_chunk.content,
-                            "session_id": session_id,
-                        }))
+            async with asyncio.timeout(timeout_seconds):
+                async for chunk in agent.astream(
+                    {"messages": messages_for_agent},
+                    config=configurable,
+                    context=ChatContext(
+                        user_id=context_data["user_id"],
+                        session_id=context_data["session_id"],
+                    ),
+                    stream_mode="messages"
+                ):
+                    if isinstance(chunk, (tuple, list)) and len(chunk) > 0:
+                        msg_chunk = chunk[0]
+                        if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.content:
+                            await status_queue.put(json.dumps({
+                                "_type": "content",
+                                "content": msg_chunk.content,
+                                "session_id": session_id,
+                            }))
             normal_exit = True
         except asyncio.CancelledError:
             await status_handler.emit_cancelled()
-        except asyncio.TimeoutError:
+        except TimeoutError:
+            # asyncio.timeout() 触发 — Triage 执行超时
+            logger.warning(
+                "Triage 执行超时 (session=%s, timeout=%.0fs)，HTTP 时间围栏触发",
+                session_id, timeout_seconds,
+            )
             await status_handler.emit_timeout()
+            await status_queue.put(json.dumps({
+                "_type": "error",
+                "error": f"请求处理超时（{timeout_seconds:.0f}秒），请尝试简化问题或创建后台任务",
+                "session_id": session_id,
+            }))
         except Exception as e:
             logger.error(f"Agent流式响应错误 (session={session_id}): {e}", exc_info=True)
             await status_handler.emit_error(f"异常: {e}")

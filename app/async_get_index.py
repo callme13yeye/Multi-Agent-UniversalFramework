@@ -3,6 +3,7 @@ import os
 import logging
 
 from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.vector_stores.milvus.utils import BM25BuiltInFunction
 from llama_index.core import VectorStoreIndex
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from app.stores.pg_database import pg_db_manager
@@ -31,6 +32,11 @@ async def async_get_milvus_index(user_id: int, embed_model: HuggingFaceEmbedding
         overwrite=False,     # 是否覆盖
         # 检索时返回的字段包含文本用于回答生成
         output_fields=["text", "file_name", "doc_id"],
+        # 开启BM25
+        # enable_sparse=True,
+        # sparse_embedding_function=BM25BuiltInFunction(),
+        # hybrid_ranker="RRFRanker",
+        # hybrid_ranker_params={"k": 60},
     )
     index = VectorStoreIndex.from_vector_store(
         vector_store=vector_store,

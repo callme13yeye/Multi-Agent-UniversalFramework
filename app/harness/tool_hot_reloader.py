@@ -58,16 +58,31 @@ class ToolHotReloader:
         logger.info("[HotReload] 工具热加载器已停止")
 
     async def _watch_loop(self) -> None:
-        """主监听循环。watchfiles.awatch 内部已做变更合并/防抖。"""
-        try:
-            async for changes in awatch(self._tools_dir):
-                if self._stop_event.is_set():
-                    break
-                await self._handle_changes(changes)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("[HotReload] 监听循环异常退出")
+        """Main watch loop with auto-reconnect on transient errors."""
+        retry_delay = 1.0
+        max_retry_delay = 30.0
+
+        while not self._stop_event.is_set():
+            try:
+                async for changes in awatch(self._tools_dir):
+                    if self._stop_event.is_set():
+                        break
+                    await self._handle_changes(changes)
+                # awatch exited normally (unlikely, but handle)
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception(
+                    "[HotReload] watch loop error, retrying in %.1fs", retry_delay,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=retry_delay,
+                    )
+                    break  # stop was set
+                except asyncio.TimeoutError:
+                    retry_delay = min(retry_delay * 2, max_retry_delay)
 
     async def _handle_changes(
         self, changes: set[tuple[int, str]]

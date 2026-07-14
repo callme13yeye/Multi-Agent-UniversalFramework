@@ -47,9 +47,10 @@ def get_config():
 
         # ── 超时配置（子智能体执行 & 工具调用） ────────────
         "timeouts": {
-            "step_execution_seconds": 300.0,   # 单步骤整体超时（5分钟）
-            "tool_call_seconds": 60.0,         # 单个工具调用超时（1分钟）
-            "approval_wait_hours": 72.0,       # 审批最长等待时间（72小时后告警）
+            "triage_run_timeout_seconds": 180.0,   # Triage 单次请求超时（3分钟）— HTTP 时间围栏
+            "step_execution_seconds": 300.0,       # 子智能体单步骤超时（5分钟）
+            "tool_call_seconds": 60.0,             # 单个工具调用超时（1分钟）
+            "approval_wait_hours": 72.0,           # 审批最长等待时间（72小时后告警）
         },
 
         # ── 清理配置 ────────────────────────────────────
