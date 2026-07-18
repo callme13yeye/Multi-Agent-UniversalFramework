@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
 class ChatContext(BaseModel):
     user_id: str
     session_id: str
+    task_id: str = ""  # 后台任务 ID（Executor Agent 运行时设置，Triage 为空）
 
 # ---------- 会话管理 ----------
 class SessionInfo(BaseModel):

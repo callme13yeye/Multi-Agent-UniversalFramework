@@ -21,6 +21,7 @@ from app.documents import RetrievalPipeline, index_manager
 from app.agents import discover_specialist_agents, async_create_agent
 from app.prompts import build_triage_prompt, build_executor_prompt
 from app.harness import EventBus, TaskExecutor, DeadLetterQueue, TaskContextManager
+from app.hooks import HookDependencies, HookRole, assemble_hooks
 from app.async_load_model import AsyncLoadModel
 from app.stores import pg_db_manager, milvus_db_manager, redis_manager, neo4j_manager
 from app.knowledge_graph import knowledge_graph_service
@@ -137,6 +138,15 @@ async def _do_rebuild(app) -> None:
     executor_prompt = build_executor_prompt(subagents)
     gateway = app.state.model_gateway
 
+    # ── 组装 hooks（rebuild 时重新组装，确保使用最新的依赖） ──
+    hook_deps = HookDependencies(
+        context_manager=getattr(app.state, "context_manager", None),
+        event_bus=getattr(app.state, "event_bus", None),
+        store=app.state.store,
+    )
+    triage_hooks = assemble_hooks(hook_deps, role=HookRole.TRIAGE)
+    executor_hooks = assemble_hooks(hook_deps, role=HookRole.EXECUTOR)
+
     # Rebuild Triage Agent
     triage_tools = _build_triage_tools()
     try:
@@ -150,6 +160,7 @@ async def _do_rebuild(app) -> None:
             context_schema=ChatContext,
             subagents=subagents,
             gateway=gateway,
+            extra_middleware=triage_hooks,
         )
     except Exception:
         logger.exception("[HotReload] Triage rebuild failed, rollback")
@@ -169,6 +180,7 @@ async def _do_rebuild(app) -> None:
             subagents=subagents,
             gateway=gateway,
             interrupt_on={"request_approval": True},
+            extra_middleware=executor_hooks,
         )
     except Exception:
         logger.exception("[HotReload] Executor rebuild failed, rollback all")
@@ -397,6 +409,28 @@ async def lifespan(app: FastAPI):
     subagents = app.state.specialist_subagents
     BASE_SYSTEM_PROMPT = build_triage_prompt(subagents)
 
+    # ── 初始化 Harness + Context 层 ────────────────────────
+    # Harness 层：事件总线 + 后台任务执行器
+    # Context 层：任务上下文管理器
+    # 注意：必须在 Agent 创建之前初始化 — Hook 需要 context_manager 和 event_bus
+
+    event_bus = EventBus(redis_client=redis_manager.client if redis_manager.available else None)
+    app.state.event_bus = event_bus
+    logger.info("[main] EventBus 初始化完成 (redis=%s)", redis_manager.available)
+
+    context_manager = TaskContextManager(store=app.state.store)
+    app.state.context_manager = context_manager
+    logger.info("[main] TaskContextManager 初始化完成")
+
+    # ── 组装 Agent Hook ───────────────────────────────────
+    hook_deps = HookDependencies(
+        context_manager=context_manager,
+        event_bus=event_bus,
+        store=app.state.store,
+    )
+    triage_hooks = assemble_hooks(hook_deps, role=HookRole.TRIAGE)
+    executor_hooks = assemble_hooks(hook_deps, role=HookRole.EXECUTOR)
+
     # ── 创建 Triage DeepAgent（第一层：分流判断） ──────────
     try:
         app.state.agent = await async_create_agent(
@@ -409,10 +443,11 @@ async def lifespan(app: FastAPI):
             context_schema=ChatContext,
             subagents=subagents,
             gateway=gateway,
+            extra_middleware=triage_hooks,
         )
         logger.info(
-            "[main] Triage DeepAgent 创建完成 (subagents=%d, gateway=enabled)",
-            len(subagents),
+            "[main] Triage DeepAgent 创建完成 (subagents=%d, hooks=%d, gateway=enabled)",
+            len(subagents), len(triage_hooks),
         )
     except Exception as e:
         logger.critical("Triage DeepAgent 创建失败: %s", e, exc_info=True)
@@ -442,26 +477,15 @@ async def lifespan(app: FastAPI):
             subagents=subagents,
             gateway=gateway,
             interrupt_on={"request_approval": True},
+            extra_middleware=executor_hooks,
         )
         logger.info(
-            "[main] Executor DeepAgent 创建完成 (subagents=%d, interrupt_on=request_approval)",
-            len(subagents),
+            "[main] Executor DeepAgent 创建完成 (subagents=%d, hooks=%d, interrupt_on=request_approval)",
+            len(subagents), len(executor_hooks),
         )
     except Exception as e:
         logger.critical("Executor DeepAgent 创建失败: %s", e, exc_info=True)
         raise
-
-    # ── 初始化 Harness + Context 层 ────────────────────────
-    # Harness 层：事件总线 + 后台任务执行器
-    # Context 层：任务上下文管理器
-
-    event_bus = EventBus(redis_client=redis_manager.client if redis_manager.available else None)
-    app.state.event_bus = event_bus
-    logger.info("[main] EventBus 初始化完成 (redis=%s)", redis_manager.available)
-
-    context_manager = TaskContextManager(store=app.state.store)
-    app.state.context_manager = context_manager
-    logger.info("[main] TaskContextManager 初始化完成")
 
     task_executor = TaskExecutor(
         store=app.state.store,

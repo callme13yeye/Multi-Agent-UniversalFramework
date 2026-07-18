@@ -125,9 +125,6 @@ class TaskExecutor:
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._handles: dict[str, TaskHandle] = {}
         self._draining: bool = False  # 排干模式 — 拒绝新任务
-        self._msg_counts: dict[str, int] = {}  # 每个任务已处理的消息数（用于 journal diff）
-        self._journal_steps: dict[str, int] = {}  # 每个任务的 journal step 计数器
-        self._unhandled_approval_rounds: dict[str, int] = {}  # 每个任务连续未处理审批标记的轮数
 
     # ── 对外接口 ──────────────────────────────────────────
 
@@ -238,9 +235,6 @@ class TaskExecutor:
 
         handle.status = TaskStatus.CANCELLED
         handle.updated_at = datetime.now().isoformat()
-        self._msg_counts.pop(task_id, None)
-        self._journal_steps.pop(task_id, None)
-        self._unhandled_approval_rounds.pop(task_id, None)
         # ── 清理快照（终端状态） ──
         if self.context_manager is not None:
             await self.context_manager.delete_snapshot(task_id)
@@ -507,6 +501,7 @@ class TaskExecutor:
                     pass
 
             from langchain_core.messages import HumanMessage
+            from app.pydantic_models import ChatContext
 
             if is_recovery:
                 execution_prompt = snapshot_info
@@ -524,6 +519,11 @@ class TaskExecutor:
             async for event in self.executor_agent.astream(
                 initial_state,
                 config=config,
+                context=ChatContext(
+                    user_id=user_id,
+                    session_id=handle.session_id,
+                    task_id=handle.task_id,
+                ),
                 stream_mode="updates",
             ):
                 # 检查 interrupt（Human-in-the-Loop）
@@ -554,9 +554,6 @@ class TaskExecutor:
         except asyncio.CancelledError:
             handle.status = TaskStatus.CANCELLED
             handle.updated_at = datetime.now().isoformat()
-            self._msg_counts.pop(handle.task_id, None)
-            self._journal_steps.pop(handle.task_id, None)
-            self._unhandled_approval_rounds.pop(handle.task_id, None)
             raise
         except ApprovalNotHandledError as e:
             # ── P0 兜底：LLM 连续忽略审批标记，强制转入 WAITING_HUMAN ──
@@ -569,9 +566,6 @@ class TaskExecutor:
             handle.status = TaskStatus.FAILED
             handle.error_message = str(e)
             handle.updated_at = datetime.now().isoformat()
-            self._msg_counts.pop(handle.task_id, None)
-            self._journal_steps.pop(handle.task_id, None)
-            self._unhandled_approval_rounds.pop(handle.task_id, None)
             # ── 清理快照（终端状态，不再恢复） ──
             if self.context_manager is not None:
                 await self.context_manager.delete_snapshot(handle.task_id)
@@ -592,6 +586,7 @@ class TaskExecutor:
         在此做格式映射。
         """
         from langgraph.types import Command
+        from app.pydantic_models import ChatContext
 
         config = {
             "configurable": {
@@ -641,6 +636,11 @@ class TaskExecutor:
             async for event in self.executor_agent.astream(
                 Command(resume=hitl_response),
                 config=config,
+                context=ChatContext(
+                    user_id=handle.user_id,
+                    session_id=handle.session_id,
+                    task_id=handle.task_id,
+                ),
                 stream_mode="updates",
             ):
                 if "__interrupt__" in event:
@@ -663,9 +663,6 @@ class TaskExecutor:
 
         except asyncio.CancelledError:
             handle.status = TaskStatus.CANCELLED
-            self._msg_counts.pop(handle.task_id, None)
-            self._journal_steps.pop(handle.task_id, None)
-            self._unhandled_approval_rounds.pop(handle.task_id, None)
             raise
         except ApprovalNotHandledError as e:
             # ── P0 兜底：LLM 在恢复后仍然忽略审批标记 ──
@@ -678,9 +675,6 @@ class TaskExecutor:
             handle.status = TaskStatus.FAILED
             handle.error_message = str(e)
             handle.updated_at = datetime.now().isoformat()
-            self._msg_counts.pop(handle.task_id, None)
-            self._journal_steps.pop(handle.task_id, None)
-            self._unhandled_approval_rounds.pop(handle.task_id, None)
             await self.event_bus.publish("task.failed", handle.to_dict())
 
     async def _handle_interrupt(self, handle: TaskHandle, interrupt_data: Any):
@@ -734,15 +728,12 @@ class TaskExecutor:
         return {"raw": str(data)}
 
     def _process_event(self, handle: TaskHandle, event: dict) -> None:
-        """将 Executor DeepAgent 的输出同步回 TaskHandle + 写入 journal。
+        """将 Agent 输出同步回 TaskHandle.progress（外部可观测性）。
 
-        DeepAgent 的 astream(stream_mode="updates") 每个 event 是 {node_name: state_update}。
-        同时做四件事：
-        1. 提取最新 AI 消息 → handle.progress（对外可观测性）
-        2. 检测新增消息 → 写入 task_journal（内部执行记忆）
-        3. 检测未处理的审批标记 → 兜底中断（P0 安全机制）
+        Journal 写入和审批标记检测已迁移到 app/hooks/ 层的 Middleware Hook，
+        TaskExecutor 仅保留 progress 同步这一外部观察者职责。
         """
-        from langchain_core.messages import AIMessage, ToolMessage
+        from langchain_core.messages import AIMessage
 
         for node_output in event.values():
             if not isinstance(node_output, dict):
@@ -752,7 +743,7 @@ class TaskExecutor:
             if not messages or not isinstance(messages, list) or len(messages) == 0:
                 continue
 
-            # ── 1. progress 同步（保持原有行为） ──
+            # progress 同步 — 取最新的 AI 消息内容
             for msg in reversed(messages):
                 if isinstance(msg, AIMessage) and msg.content:
                     content = msg.content
@@ -761,176 +752,26 @@ class TaskExecutor:
                         handle.updated_at = datetime.now().isoformat()
                         break
 
-            # ── 2. journal diff: 检测新消息并写入 ──
-            prev_count = self._msg_counts.get(handle.task_id, 0)
-            new_count = len(messages)
-            if new_count > prev_count:
-                new_messages = messages[prev_count:]
-                self._msg_counts[handle.task_id] = new_count
-                # 异步写 journal — 不阻塞事件处理
-                asyncio.create_task(
-                    self._write_journal_from_messages(handle, new_messages)
-                )
-
-                # ── 3. 审批标记兜底检测（P0 安全机制） ──
-                self._check_approval_marker_handled(handle, new_messages)
-
-    def _check_approval_marker_handled(
-        self,
-        handle: TaskHandle,
-        new_messages: list,
-    ) -> None:
-        """检测 Executor LLM 是否正确处理了审批标记。
-
-        P0 兜底机制：正常情况下 Executor LLM 在 Specialist 返回
-        ``[HUMAN_APPROVAL_REQUIRED]`` 后的下一轮就会调用 ``request_approval``。
-        但如果 LLM 因幻觉/上下文压缩/推理偏差连续忽略该标记，此方法在
-        3 轮后强制抛 ``ApprovalNotHandledError``，将任务转入 WAITING_HUMAN。
-
-        计数器重置条件：检测到 ``request_approval`` 工具调用（说明 LLM 正确处理了）
-        计数器递增条件：本轮消息包含 ``[HUMAN_APPROVAL_REQUIRED]`` 但没有 ``request_approval`` 调用
-        """
-        from langchain_core.messages import ToolMessage
-
-        APPROVAL_MARKER = "[HUMAN_APPROVAL_REQUIRED]"
-        task_id = handle.task_id
-
-        # ── 检查本轮是否有 request_approval 调用 ──
-        has_request_approval = any(
-            isinstance(msg, ToolMessage) and getattr(msg, "name", "") == "request_approval"
-            for msg in new_messages
-        )
-
-        if has_request_approval:
-            # LLM 正确处理了审批 — 重置计数器
-            if self._unhandled_approval_rounds.get(task_id, 0) > 0:
-                logger.info(
-                    "[ApprovalGuard] %s: request_approval 已调用，计数器重置 (之前=%d)",
-                    task_id, self._unhandled_approval_rounds[task_id],
-                )
-            self._unhandled_approval_rounds[task_id] = 0
-            return
-
-        # ── 检查本轮是否有 [HUMAN_APPROVAL_REQUIRED] 标记 ──
-        has_approval_marker = any(
-            APPROVAL_MARKER in str(getattr(msg, "content", ""))
-            for msg in new_messages
-        )
-
-        if not has_approval_marker:
-            # 本轮无审批标记 — 不增加也不重置计数器（可能还在等 Specialist 返回）
-            return
-
-        # ── 有标记但没 request_approval → 累积 ──
-        current = self._unhandled_approval_rounds.get(task_id, 0) + 1
-        self._unhandled_approval_rounds[task_id] = current
-
-        # 尝试从消息中提取 approval_id
-        approval_id = ""
-        for msg in new_messages:
-            content = str(getattr(msg, "content", ""))
-            if APPROVAL_MARKER in content:
-                # 尝试从 JSON 中提取 approval_id
-                import json as _json
-                try:
-                    data = _json.loads(content)
-                    approval_id = data.get("approval_id", "")
-                except (_json.JSONDecodeError, TypeError):
-                    pass
-                if approval_id:
-                    break
-
-        logger.warning(
-            "[ApprovalGuard] %s: 第 %d 轮未处理审批标记 approval_id=%s",
-            task_id, current, approval_id or "N/A",
-        )
-
-        if current >= 3:
-            raise ApprovalNotHandledError(
-                task_id=task_id,
-                rounds=current,
-                approval_id=approval_id,
-            )
-
-    # ── Journal 写入辅助 ──────────────────────────────────
-
-    async def _write_journal_from_messages(
-        self,
-        handle: TaskHandle,
-        new_messages: list,
-    ) -> None:
-        """从新增消息中提取关键事件，写入 task_journal。
-
-        检测规则：
-        - ToolMessage → Specialist 委托完成 → "specialist_result"
-        - AIMessage（> 100 字符）→ 可能是关键决策 → "decision"
-        - AIMessage 含错误关键词 → "error"
-        """
-        if self.context_manager is None:
-            return
-
-        from langchain_core.messages import AIMessage, ToolMessage
-
-        for msg in new_messages:
-            step = self._journal_steps.get(handle.task_id, 0) + 1
-
-            if isinstance(msg, ToolMessage):
-                # Specialist 委托返回结果
-                tool_name = getattr(msg, "name", "unknown")
-                content = getattr(msg, "content", "")
-                result_text = content if isinstance(content, str) else str(content)[:500]
-
-                entry = JournalEntry(
-                    step=step,
-                    event="specialist_result",
-                    description=f"委托 {tool_name} 完成",
-                    detail={
-                        "specialist": tool_name,
-                        "result_summary": result_text[:300],
-                    },
-                )
-                await self.context_manager.write_journal_entry(handle.task_id, entry)
-                self._journal_steps[handle.task_id] = step
-                logger.debug(
-                    "[Journal] %s #%d specialist_result: %s",
-                    handle.task_id, step, tool_name,
-                )
-
-            elif isinstance(msg, AIMessage):
-                content = getattr(msg, "content", "")
-                if not content or not isinstance(content, str):
-                    continue
-                content = content.strip()
-                if len(content) < 100:
-                    continue
-
-                # 判断事件类型
-                error_keywords = ("失败", "错误", "异常", "❌", "failed", "error", "exception")
-                is_error = any(kw in content[:200] for kw in error_keywords)
-                event_type = "error" if is_error else "decision"
-
-                entry = JournalEntry(
-                    step=step,
-                    event=event_type,
-                    description=content[:200],
-                    detail={
-                        "is_error": is_error,
-                        "full_length": len(content),
-                    },
-                )
-                await self.context_manager.write_journal_entry(handle.task_id, entry)
-                self._journal_steps[handle.task_id] = step
-                logger.debug(
-                    "[Journal] %s #%d %s: %.80s",
-                    handle.task_id, step, event_type, content,
-                )
+    async def _next_journal_step(self, task_id: str) -> int:
+        """从 Store 读取并递增 journal 步骤计数器（与 hook 共享计数器）。"""
+        try:
+            item = await self.store.aget(("task_journal_meta",), task_id)
+            current = item.value.get("step", 0) if item and item.value else 0
+        except Exception:
+            current = 0
+        next_val = current + 1
+        try:
+            await self.store.aput(("task_journal_meta",), task_id, {"step": next_val})
+        except Exception:
+            pass
+        return next_val
 
     async def _write_completion_journal(self, handle: TaskHandle) -> None:
         """任务完成时写入最终 journal 条目。"""
         if self.context_manager is None:
             return
 
-        step = self._journal_steps.get(handle.task_id, 0) + 1
+        step = await self._next_journal_step(handle.task_id)
         entry = JournalEntry(
             step=step,
             event="completed",
@@ -941,10 +782,6 @@ class TaskExecutor:
             },
         )
         await self.context_manager.write_journal_entry(handle.task_id, entry)
-        self._journal_steps[handle.task_id] = step
-        # 清理运行时跟踪状态
-        self._msg_counts.pop(handle.task_id, None)
-        self._journal_steps.pop(handle.task_id, None)
 
     async def _write_interrupt_journal(
         self,
@@ -955,7 +792,7 @@ class TaskExecutor:
         if self.context_manager is None:
             return
 
-        step = self._journal_steps.get(handle.task_id, 0) + 1
+        step = await self._next_journal_step(handle.task_id)
         descriptions = []
         for req in interrupt_info.get("action_requests", []):
             desc = req.get("description", "") or f"等待审批: {req.get('name', 'unknown')}"
@@ -971,8 +808,6 @@ class TaskExecutor:
             },
         )
         await self.context_manager.write_journal_entry(handle.task_id, entry)
-        self._journal_steps[handle.task_id] = step
-        # 中断时不清除 _msg_counts — 恢复后继续 diff
 
     @staticmethod
     def _build_execution_prompt(goal: str, context: dict[str, Any] | None) -> str:
@@ -1117,7 +952,7 @@ class TaskExecutor:
 
         # ── 写入 journal ──
         if self.context_manager is not None:
-            step = self._journal_steps.get(handle.task_id, 0) + 1
+            step = await self._next_journal_step(handle.task_id)
             entry = JournalEntry(
                 step=step,
                 event="approval_requested",
@@ -1132,7 +967,6 @@ class TaskExecutor:
             )
             try:
                 await self.context_manager.write_journal_entry(handle.task_id, entry)
-                self._journal_steps[handle.task_id] = step
             except Exception as journal_err:
                 logger.warning("[TaskExecutor] 强制中断 journal 写入失败: %s", journal_err)
 
@@ -1144,9 +978,6 @@ class TaskExecutor:
             **handle.to_dict(),
             "interrupt": synthetic_interrupt,
         })
-
-        # ── 清理跟踪状态 ──
-        self._unhandled_approval_rounds.pop(handle.task_id, None)
 
         logger.warning(
             "[TaskExecutor] 审批兜底中断完成: %s rounds=%d approval_id=%s",
