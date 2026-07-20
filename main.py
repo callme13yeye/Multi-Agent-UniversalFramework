@@ -3,13 +3,69 @@ import asyncio
 import os
 import sys
 import time
-# 猴子补丁，官方BUG
+# ── 猴子补丁：修复第三方库 BUG ────────────────────────────────
+# 1. AsyncBatchedBaseStore.__del__ 在未初始化时崩溃
 from langgraph.store.base.batch import AsyncBatchedBaseStore
 _original_del = AsyncBatchedBaseStore.__del__
 def safe_del(self):
     if hasattr(self, '_task'):
         _original_del(self)
 AsyncBatchedBaseStore.__del__ = safe_del
+
+# 2. deepagents FilesystemMiddleware._aintercept_large_tool_result
+#    只处理 ToolMessage/Command，但 LangGraph 工具执行管线可能返回
+#    list[Command|ToolMessage] 或（在特定 langsmith traceable 交互下）coroutine。
+#    对不认识的类型直接透传，跳过 large-result eviction 优化。
+from deepagents.middleware.filesystem import FilesystemMiddleware as _FSM
+
+_original_aintercept = _FSM._aintercept_large_tool_result
+
+async def _patched_aintercept_large_tool_result(
+    self, tool_result, runtime,
+):
+    """Safe wrapper: 对非 ToolMessage/Command 类型降级处理。"""
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+    import inspect as _inspect
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # coroutine 必须先 await 才能判断类型，否则下游拿到未执行的协程对象会崩溃
+    if _inspect.iscoroutine(tool_result):
+        _logger.warning(
+            "_aintercept_large_tool_result 收到 coroutine，先 await 再处理"
+        )
+        tool_result = await tool_result
+
+    if isinstance(tool_result, (ToolMessage, Command)):
+        return await _original_aintercept(self, tool_result, runtime)
+    # 不认识的类型（list 等）：安全透传，跳过 eviction
+    _logger.warning(
+        "_aintercept_large_tool_result 收到未预期的类型 %s，已安全透传",
+        type(tool_result).__name__,
+    )
+    return tool_result
+
+_FSM._aintercept_large_tool_result = _patched_aintercept_large_tool_result
+
+# 同步版本同样修复
+_original_intercept = _FSM._intercept_large_tool_result
+
+def _patched_intercept_large_tool_result(self, tool_result, runtime):
+    """Safe wrapper: 对非 ToolMessage/Command 类型降级透传。"""
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+    if isinstance(tool_result, (ToolMessage, Command)):
+        return _original_intercept(self, tool_result, runtime)
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.warning(
+        "_intercept_large_tool_result 收到未预期的类型 %s，已安全透传",
+        type(tool_result).__name__,
+    )
+    return tool_result
+
+_FSM._intercept_large_tool_result = _patched_intercept_large_tool_result
 
 from app.tools import (
     register_knowledge_resource,

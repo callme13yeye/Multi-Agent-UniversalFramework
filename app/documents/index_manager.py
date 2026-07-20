@@ -168,6 +168,18 @@ class IndexManager:
 
             if needs_rebuild:
                 await self._delete_milvus_nodes(user_id, file_hash)
+                # 清理旧文档关联的知识图谱实体和关系
+                try:
+                    from app.knowledge_graph import knowledge_graph_service
+                    if knowledge_graph_service.available:
+                        await knowledge_graph_service.remove_document_entities(
+                            str(existing_by_hash["id"])
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "旧文档 %s 图谱清理失败（非致命）: %s",
+                        existing_by_hash["id"], e,
+                    )
                 await self.pg.delete_document_record(existing_by_hash["id"])
 
         elif existing_by_filename:
@@ -178,6 +190,18 @@ class IndexManager:
                 original_filename, old_hash[:16], file_hash[:16],
             )
             await self._delete_milvus_nodes(user_id, old_hash)
+            # 清理旧文档关联的知识图谱实体和关系
+            try:
+                from app.knowledge_graph import knowledge_graph_service
+                if knowledge_graph_service.available:
+                    await knowledge_graph_service.remove_document_entities(
+                        str(existing_by_filename["id"])
+                    )
+            except Exception as e:
+                logger.warning(
+                    "旧文档 %s 图谱清理失败（非致命）: %s",
+                    existing_by_filename["id"], e,
+                )
             await self.pg.delete_document_record(existing_by_filename["id"])
 
         # ── 创建文档记录（先创建，用于后续状态跟踪）──
@@ -294,9 +318,8 @@ class IndexManager:
                 if not knowledge_graph_service.available:
                     return
                 await self.pg.update_document_status(doc_id, status=DocumentStatus.GRAPH_EXTRACTING)
-                full_text = "\n\n".join(n.get_content() for n in nodes)
                 entity_count = await knowledge_graph_service.process_document(
-                    text=full_text,
+                    nodes=nodes,
                     doc_id=str(doc_id),
                 )
                 logger.info(

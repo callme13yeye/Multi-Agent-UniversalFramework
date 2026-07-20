@@ -139,12 +139,24 @@ class Neo4jManager:
             # 文档节点唯一性约束
             "CREATE CONSTRAINT document_unique IF NOT EXISTS "
             "FOR (d:Document) REQUIRE d.doc_id IS UNIQUE",
+
+            # Chunk 节点唯一性约束 — 与向量侧 node_id 一一对应
+            "CREATE CONSTRAINT chunk_unique IF NOT EXISTS "
+            "FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
         ]
 
         indexes = [
             # 实体名称全文索引（用于关键词搜索）
             "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS "
             "FOR (e:Entity) ON EACH [e.name, e.description]",
+
+            # Chunk 文件哈希索引 — 快速查找某文件的所有 chunk
+            "CREATE INDEX chunk_file_hash_idx IF NOT EXISTS "
+            "FOR (c:Chunk) ON (c.file_hash)",
+
+            # Chunk 内容哈希索引 — 跨文件检测相同内容
+            "CREATE INDEX chunk_content_hash_idx IF NOT EXISTS "
+            "FOR (c:Chunk) ON (c.content_hash)",
         ]
 
         for stmt in constraints + indexes:

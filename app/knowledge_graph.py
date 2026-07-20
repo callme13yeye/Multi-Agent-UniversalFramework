@@ -513,28 +513,449 @@ class KnowledgeGraphService:
         logger.info("[KG] 存储完成: %d 个实体 (doc=%s)", stored_count, doc_id)
         return stored_count
 
+    # ── Chunk 级增量处理 ──────────────────────────────────────
+
+    async def _classify_chunks(
+        self,
+        nodes: list,
+        file_hash: str,
+        doc_id: str,
+    ) -> tuple[list, list]:
+        """分类 chunk：新增 vs 已存在 vs 过期。
+
+        用 content_hash 做匹配键（而非 chunk_id），实现：
+        - 同文件修改后，内容不变的 chunk → 跳过 LLM 抽取
+        - 不同文件含相同内容 → 跨文件复用实体
+        - 旧文档有但新文档没有的 chunk → 标记为 stale
+
+        Returns:
+            (new_nodes, stale_chunk_ids)
+        """
+        if not neo4j_manager.available:
+            return list(nodes), []
+
+        # 为所有 node 计算并注入 content_hash
+        for node in nodes:
+            if "content_hash" not in node.metadata:
+                content = node.get_content()
+                node.metadata["content_hash"] = hashlib.sha256(
+                    content.encode()
+                ).hexdigest()[:16]
+
+        incoming_content_hashes = [
+            n.metadata["content_hash"] for n in nodes
+        ]
+        incoming_chunk_ids = {node.node_id for node in nodes}
+
+        # Query 1: 查该文件已有的 chunk（用于 stale 检测）
+        existing_chunks = await neo4j_manager.run_query(
+            """
+            MATCH (c:Chunk {file_hash: $file_hash})
+            RETURN c.chunk_id AS chunk_id, c.content_hash AS content_hash
+            """,
+            {"file_hash": file_hash},
+        )
+        existing_chunk_ids = {r["chunk_id"] for r in existing_chunks}
+
+        # Query 2: 跨文件内容去重 — 任意 Chunk 有匹配 content_hash？
+        # 分批查询避免 IN 列表过大（>500 时分批）
+        existing_content_hashes: set[str] = set()
+        batch_size = 200
+        for i in range(0, len(incoming_content_hashes), batch_size):
+            batch = incoming_content_hashes[i:i + batch_size]
+            records = await neo4j_manager.run_query(
+                """
+                MATCH (c:Chunk)
+                WHERE c.content_hash IN $content_hashes
+                RETURN DISTINCT c.content_hash AS content_hash
+                """,
+                {"content_hashes": batch},
+            )
+            existing_content_hashes.update(r["content_hash"] for r in records)
+
+        # 新 chunk = content_hash 从未出现过
+        new_nodes = [
+            n for n in nodes
+            if n.metadata["content_hash"] not in existing_content_hashes
+        ]
+
+        # 过期 chunk = Neo4j 中存在但本次不包含
+        stale_chunk_ids = list(existing_chunk_ids - incoming_chunk_ids)
+
+        logger.info(
+            "[KG] chunk 分类: total=%d, new=%d, existing=%d, stale=%d",
+            len(nodes), len(new_nodes),
+            len(nodes) - len(new_nodes), len(stale_chunk_ids),
+        )
+        return new_nodes, stale_chunk_ids
+
+    async def _store_entities_with_chunks(
+        self,
+        entities: list[Entity],
+        relations: list[Relation],
+        doc_id: str,
+    ) -> int:
+        """写入实体并同步创建 Chunk 节点 + EXTRACTED_FROM 关系。
+
+        相比 store_entities 多了 Chunk 节点创建和细粒度溯源。
+        失败时回退到 store_entities（仅链接 Document，无 Chunk 追踪）。
+        """
+        if not neo4j_manager.available:
+            return 0
+
+        stored_count = 0
+
+        if entities:
+            try:
+                records = await neo4j_manager.run_write(
+                    """
+                    UNWIND $entities AS entity
+                    MERGE (e:Entity {name: entity.name, type: entity.type})
+                    SET e.description = CASE
+                        WHEN entity.description <> '' THEN entity.description
+                        ELSE COALESCE(e.description, '')
+                    END
+                    SET e.source_doc_id = CASE
+                        WHEN entity.source_doc_id <> '' THEN entity.source_doc_id
+                        ELSE COALESCE(e.source_doc_id, '')
+                    END
+                    SET e.updated_at = datetime()
+                    // 链接到 Document（向后兼容）
+                    FOREACH (_ IN CASE WHEN $doc_id <> '' THEN [1] ELSE [] END |
+                        MERGE (d:Document {doc_id: $doc_id})
+                        MERGE (e)-[:MENTIONED_IN]->(d)
+                    )
+                    // 链接到 Chunk（细粒度溯源）
+                    FOREACH (_ IN CASE WHEN entity.chunk_id <> '' THEN [1] ELSE [] END |
+                        MERGE (c:Chunk {chunk_id: entity.chunk_id})
+                        SET c.content_hash = entity.content_hash
+                        SET c.file_hash = entity.file_hash
+                        SET c.doc_id = $doc_id
+                        SET c.chunk_index = entity.chunk_index
+                        SET c.content_summary = entity.content_summary
+                        MERGE (e)-[:EXTRACTED_FROM]->(c)
+                    )
+                    RETURN count(e) AS stored_count
+                    """,
+                    {
+                        "entities": [
+                            {
+                                "name": e.name,
+                                "type": e.type,
+                                "description": e.description,
+                                "source_doc_id": e.source_doc_id,
+                                "chunk_id": e.metadata.get("chunk_id", ""),
+                                "content_hash": e.metadata.get("content_hash", ""),
+                                "file_hash": e.metadata.get("file_hash", ""),
+                                "chunk_index": e.metadata.get("chunk_index", 0),
+                                "content_summary": e.metadata.get("content_summary", ""),
+                            }
+                            for e in entities
+                        ],
+                        "doc_id": doc_id,
+                    },
+                )
+                if records:
+                    stored_count = records[0].get("stored_count", len(entities))
+            except Exception as e:
+                logger.warning("[KG] 实体批量写入(含chunk)失败，回退无chunk模式: %s", e)
+                stored_count = await self.store_entities(
+                    entities, relations, doc_id=doc_id,
+                )
+
+        # ── 批量写入关系（复用已有逻辑） ──
+        from collections import defaultdict
+        rels_by_type: dict[str, list[Relation]] = defaultdict(list)
+        for rel in relations:
+            rel_type = rel.relation.replace("`", "").replace("'", "")
+            if not rel_type or len(rel_type) > 50:
+                rel_type = "RELATED_TO"
+            rels_by_type[rel_type].append(rel)
+
+        for rel_type, rels in rels_by_type.items():
+            try:
+                await neo4j_manager.run_write(
+                    f"""
+                    UNWIND $relations AS rel
+                    MATCH (a:Entity {{name: rel.source}})
+                    MATCH (b:Entity {{name: rel.target}})
+                    MERGE (a)-[r:`{rel_type}`]->(b)
+                    SET r.description = CASE
+                        WHEN rel.description <> '' THEN rel.description
+                        ELSE COALESCE(r.description, '')
+                    END
+                    SET r.source_doc_id = $doc_id
+                    SET r.updated_at = datetime()
+                    """,
+                    {
+                        "relations": [
+                            {
+                                "source": r.source,
+                                "target": r.target,
+                                "description": r.description,
+                            }
+                            for r in rels
+                        ],
+                        "doc_id": doc_id,
+                    },
+                )
+            except Exception as e:
+                logger.warning("[KG] 关系批量写入失败 (type=%s): %s", rel_type, e)
+
+        logger.info("[KG] 存储完成(chunk-aware): %d 个实体 (doc=%s)", stored_count, doc_id)
+        return stored_count
+
+    async def _link_existing_content_to_new_chunks(
+        self,
+        nodes: list,
+        doc_id: str,
+        file_hash: str,
+    ) -> int:
+        """跨文件内容复用：为新文档中内容已存在的 chunk 创建 Chunk 节点，
+        并复用已有实体，无需 LLM 重抽取。
+
+        仅当跨文件 content_hash 匹配时才有效（同文件已有 chunk 会被
+        _classify_chunks 中的 chunk_id 匹配覆盖）。
+        """
+        if not neo4j_manager.available or not nodes:
+            return 0
+
+        try:
+            records = await neo4j_manager.run_write(
+                """
+                UNWIND $nodes AS node
+                // 为新文件创建 Chunk 节点
+                MERGE (c:Chunk {chunk_id: node.chunk_id})
+                SET c.content_hash = node.content_hash,
+                    c.file_hash = node.file_hash,
+                    c.doc_id = $doc_id,
+                    c.chunk_index = node.chunk_index,
+                    c.content_summary = node.content_summary
+                // 找到已有内容相同 Chunk 关联的实体
+                WITH c, node
+                MATCH (old_c:Chunk {content_hash: node.content_hash})
+                WHERE old_c.chunk_id <> node.chunk_id
+                MATCH (e:Entity)-[:EXTRACTED_FROM]->(old_c)
+                // 链接到新 Document
+                FOREACH (_ IN CASE WHEN $doc_id <> '' THEN [1] ELSE [] END |
+                    MERGE (d:Document {doc_id: $doc_id})
+                    MERGE (e)-[:MENTIONED_IN]->(d)
+                )
+                // 链接到新 Chunk
+                MERGE (e)-[:EXTRACTED_FROM]->(c)
+                RETURN COUNT(DISTINCT e) AS linked_count
+                """,
+                {
+                    "nodes": [
+                        {
+                            "chunk_id": n.node_id,
+                            "content_hash": n.metadata.get("content_hash", ""),
+                            "file_hash": file_hash,
+                            "chunk_index": n.metadata.get("chunk_index", 0),
+                            "content_summary": n.metadata.get("chunk_summary", ""),
+                        }
+                        for n in nodes
+                    ],
+                    "doc_id": doc_id,
+                },
+            )
+            count = records[0].get("linked_count", 0) if records else 0
+            logger.info(
+                "[KG] 跨文件复用: %d chunks 内容已存在, 链接 %d 实体",
+                len(nodes), count,
+            )
+            return count
+        except Exception as e:
+            logger.warning("[KG] 跨文件实体复用失败: %s", e)
+            return 0
+
+    async def _cleanup_stale_chunks(self, chunk_ids: list[str]) -> int:
+        """清理过期 Chunk — 文档更新后不再存在的 chunk。
+
+        1. 删除 (Entity)-[:EXTRACTED_FROM]->(stale_chunk)
+        2. 删除 Chunk 节点
+        3. 删除孤立 Entity（无 EXTRACTED_FROM 且无 MENTIONED_IN）
+        """
+        if not neo4j_manager.available or not chunk_ids:
+            return 0
+
+        try:
+            records = await neo4j_manager.run_write(
+                """
+                UNWIND $chunk_ids AS cid
+                MATCH (c:Chunk {chunk_id: cid})
+                OPTIONAL MATCH (e:Entity)-[r:EXTRACTED_FROM]->(c)
+                DELETE r
+                DETACH DELETE c
+                WITH e
+                WHERE e IS NOT NULL
+                AND NOT (e)-[:EXTRACTED_FROM]->(:Chunk)
+                AND NOT (e)-[:MENTIONED_IN]->(:Document)
+                DETACH DELETE e
+                RETURN COUNT(e) AS deleted_entities
+                """,
+                {"chunk_ids": chunk_ids},
+            )
+            count = records[0].get("deleted_entities", 0) if records else 0
+            logger.info(
+                "[KG] 清理 %d 个过期 chunk，删除 %d 个孤立实体",
+                len(chunk_ids), count,
+            )
+            return count
+        except Exception as e:
+            logger.error("[KG] 过期 chunk 清理失败: %s", e)
+            return 0
+
     # ── 文档批量处理 ─────────────────────────────────────────
 
     @observe(name="KG.process_document")
     async def process_document(
         self,
-        text: str,
-        doc_id: str,
+        text: str = "",
+        nodes: list = None,
+        doc_id: str = "",
         chunk_size: int = 2000,
     ) -> int:
-        """处理单个文档 — 分块抽取实体并写入图谱。
+        """处理文档 — 增量抽取实体并写入图谱。
+
+        支持两种调用方式：
+        - nodes=[]（推荐）: 接收向量侧的 BaseNode 列表，利用确定性 node_id
+          做 chunk 级增量检测，只对内容变化的 chunk 做 LLM 抽取。
+        - text=""（废弃）: 旧接口，传入全文字符串，内部自行分块，
+          无增量能力。新代码应使用 nodes 参数。
 
         Args:
-            text: 文档全文
+            text: 文档全文（废弃，仅向后兼容）
+            nodes: 向量侧处理后的 BaseNode 列表（推荐）
             doc_id: 文档唯一标识
-            chunk_size: 每块文本大小（字符数）
+            chunk_size: 每块文本大小（仅 text 模式使用）
 
         Returns:
             写入的总实体数
         """
-        if not neo4j_manager.available:
+        # ── 向后兼容：text 模式 ──
+        if nodes is None and text:
+            logger.warning(
+                "[KG] process_document(text=...) 已废弃，"
+                "请传入 nodes=list[BaseNode] 以启用增量处理"
+            )
+            return await self._process_document_from_text(text, doc_id, chunk_size)
+
+        if not neo4j_manager.available or not nodes:
             return 0
 
+        # 获取文件哈希（从首个 node 的 metadata）
+        file_hash = nodes[0].metadata.get("file_hash", "")
+
+        # ── Phase 1: 分类 chunk ──
+        new_nodes, stale_chunk_ids = await self._classify_chunks(
+            nodes=nodes, file_hash=file_hash, doc_id=doc_id,
+        )
+
+        # ── Phase 2: 无新增 → 跳过 LLM 抽取 ──
+        if not new_nodes:
+            logger.info(
+                "[KG] 文档 %s 无新增 chunk，跳过 LLM 抽取 (%d/%d chunks 已存在)",
+                doc_id, len(nodes) - len(new_nodes), len(nodes),
+            )
+            # 仍需要为"已有内容"的 chunk 创建 Chunk 节点（同文件场景）
+            existing_nodes = [
+                n for n in nodes
+                if n.metadata.get("content_hash", "") and n.node_id not in {
+                    nn.node_id for nn in new_nodes
+                }
+            ]
+            if existing_nodes:
+                await self._link_existing_content_to_new_chunks(
+                    nodes=existing_nodes, doc_id=doc_id, file_hash=file_hash,
+                )
+            if stale_chunk_ids:
+                await self._cleanup_stale_chunks(stale_chunk_ids)
+            return 0
+
+        # ── Phase 3: LLM 抽取（仅新 chunk）──
+        semaphore = asyncio.Semaphore(5)
+
+        async def _extract_one(i: int, node):
+            async with semaphore:
+                content = node.get_content()
+                chunk_id = node.node_id
+                # 截断过长内容
+                content_truncated = content[:4000] if len(content) > 4000 else content
+                entities, relations = await self.extract_entities(
+                    content_truncated, doc_id=doc_id, max_entities=15,
+                )
+                # 注入 chunk 元数据
+                for e in entities:
+                    e.metadata["chunk_id"] = chunk_id
+                    e.metadata["chunk_index"] = node.metadata.get("chunk_index", i)
+                    e.metadata["content_hash"] = node.metadata.get("content_hash", "")
+                    e.metadata["file_hash"] = file_hash
+                    e.metadata["content_summary"] = node.metadata.get("chunk_summary", "")
+                logger.debug(
+                    "[KG] chunk %d/%d (%s…): +%d 实体",
+                    i + 1, len(new_nodes), chunk_id[:20], len(entities),
+                )
+                return entities, relations
+
+        results = await asyncio.gather(*[
+            _extract_one(i, node) for i, node in enumerate(new_nodes)
+        ])
+
+        all_entities: list[Entity] = []
+        all_relations: list[Relation] = []
+        for entities, relations in results:
+            all_entities.extend(entities)
+            all_relations.extend(relations)
+
+        # ── Phase 4: 全局去重 + 写入 ──
+        seen = set()
+        deduped_entities = []
+        for e in all_entities:
+            key = (e.name, e.type)
+            if key not in seen:
+                seen.add(key)
+                deduped_entities.append(e)
+
+        total_entities = 0
+        if deduped_entities:
+            total_entities = await self._store_entities_with_chunks(
+                deduped_entities, all_relations, doc_id=doc_id,
+            )
+
+        # ── Phase 5: 跨文件复用已有内容 ──
+        existing_nodes = [
+            n for n in nodes
+            if n.metadata.get("content_hash", "") and n.node_id not in {
+                nn.node_id for nn in new_nodes
+            }
+        ]
+        if existing_nodes:
+            await self._link_existing_content_to_new_chunks(
+                nodes=existing_nodes, doc_id=doc_id, file_hash=file_hash,
+            )
+
+        # ── Phase 6: 清理过期 chunk ──
+        if stale_chunk_ids:
+            await self._cleanup_stale_chunks(stale_chunk_ids)
+
+        logger.info(
+            "[KG] 文档处理完成: doc=%s, new=%d/%d, stale=%d, entities=%d",
+            doc_id, len(new_nodes), len(nodes),
+            len(stale_chunk_ids), total_entities,
+        )
+        return total_entities
+
+    async def _process_document_from_text(
+        self,
+        text: str,
+        doc_id: str,
+        chunk_size: int = 2000,
+    ) -> int:
+        """旧 text 模式 — 内部段落分块 + 全量抽取（无增量）。
+
+        仅作为向后兼容保留。新代码应使用 process_document(nodes=...)。
+        """
         # 简单分块（按句子边界粗略分割）
         chunks = []
         current = ""
@@ -547,14 +968,12 @@ class KnowledgeGraphService:
         if current.strip():
             chunks.append(current.strip())
 
-        # 限制处理块数（保护 token 消耗）
         max_chunks = min(len(chunks), 10)
         chunks = chunks[:max_chunks]
 
         total_entities = 0
 
-        # 并行抽取所有分块（LLM 调用是主要瓶颈，chunk 间无依赖）
-        semaphore = asyncio.Semaphore(5)  # 限制并发数，避免触发 API 限流
+        semaphore = asyncio.Semaphore(5)
 
         async def _extract_one(i: int, chunk: str):
             async with semaphore:
@@ -574,7 +993,6 @@ class KnowledgeGraphService:
             all_entities.extend(entities)
             all_relations.extend(relations)
 
-        # 全局去重后批量写入
         seen = set()
         deduped_entities = []
         for e in all_entities:
@@ -584,10 +1002,12 @@ class KnowledgeGraphService:
                 deduped_entities.append(e)
 
         if deduped_entities:
-            total_entities = await self.store_entities(deduped_entities, all_relations, doc_id=doc_id)
+            total_entities = await self.store_entities(
+                deduped_entities, all_relations, doc_id=doc_id,
+            )
 
         logger.info(
-            "[KG] 文档处理完成: doc=%s, chunks=%d, entities=%d, relations=%d",
+            "[KG] 文档处理完成(text模式): doc=%s, chunks=%d, entities=%d, relations=%d",
             doc_id, len(chunks), total_entities, len(all_relations),
         )
         return total_entities
@@ -817,9 +1237,12 @@ class KnowledgeGraphService:
     # ── 删除文档关联的图谱数据 ───────────────────────────────
 
     async def remove_document_entities(self, doc_id: str) -> int:
-        """删除与指定文档关联的所有实体和关系。
+        """删除与指定文档关联的所有实体、关系和 Chunk 节点。
 
-        仅删除仅由该文档引入的孤立实体；共享实体保留。
+        清理顺序:
+        1. 删除所有 Chunk 节点及其 EXTRACTED_FROM 关系
+        2. 删除 Document 节点及其 MENTIONED_IN 关系
+        3. 删除孤立实体（无 EXTRACTED_FROM 且无 MENTIONED_IN）
 
         Args:
             doc_id: 文档 ID
@@ -833,16 +1256,23 @@ class KnowledgeGraphService:
         try:
             records = await neo4j_manager.run_write(
                 """
+                // Step 1: 删除该文档的所有 Chunk 节点
+                MATCH (c:Chunk {doc_id: $doc_id})
+                OPTIONAL MATCH (e1:Entity)-[r1:EXTRACTED_FROM]->(c)
+                DELETE r1
+                DETACH DELETE c
+                // Step 2: 删除 Document 节点和 MENTIONED_IN 关系
+                WITH e1
                 MATCH (d:Document {doc_id: $doc_id})
-                OPTIONAL MATCH (d)-[r1:MENTIONED_IN]-(e:Entity)
-                DETACH DELETE d, r1
-                WITH e
-                WHERE e IS NOT NULL
-                // 删除不再关联任何文档的孤立实体
-                MATCH (e)
-                WHERE NOT (e)-[:MENTIONED_IN]->(:Document)
-                DETACH DELETE e
-                RETURN COUNT(e) AS deleted_count
+                OPTIONAL MATCH (d)-[r2:MENTIONED_IN]-(e2:Entity)
+                DETACH DELETE d, r2
+                // Step 3: 删除孤立实体
+                WITH e2
+                WHERE e2 IS NOT NULL
+                AND NOT (e2)-[:EXTRACTED_FROM]->(:Chunk)
+                AND NOT (e2)-[:MENTIONED_IN]->(:Document)
+                DETACH DELETE e2
+                RETURN COUNT(e2) AS deleted_count
                 """,
                 {"doc_id": doc_id},
             )
@@ -850,7 +1280,7 @@ class KnowledgeGraphService:
             logger.info("[KG] 文档 %s 图谱数据已清理 (删除 %d 个实体)", doc_id, count)
             return count
         except Exception as e:
-            logger.error("[KG] 文档 %s 图谱数据清理失败: %s", doc_id, e)
+            logger.error("[KG] 文档 %s 图谱数据清理失败: %s", e)
             return 0
 
 
